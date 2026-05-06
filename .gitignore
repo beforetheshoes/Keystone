@@ -1,0 +1,78 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Xcode build artifacts
+.derivedData/
+DerivedData/
+build/
+Build/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.xcresult/
+TestResults/
+
+# Generated project (regenerate with `xcodegen generate`)
+Keystone.xcodeproj/
+
+# SwiftPM
+.swiftpm/
+.build/
+Package.pins
+Packages/
+
+# IDE / editors
+*.idea/
+*.vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+
+# Secrets — credentials, signing material, API keys.
+# Keep this list aggressive; better to false-positive than to ever leak.
+*.env
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
+*.cer
+*.cert
+*.crt
+*.key
+*.pfx
+*.mobileprovision
+*.provisionprofile
+secrets/
+.secrets/
+secrets.*
+credentials.*
+GoogleService-Info.plist
+AuthKey_*.p8
+
+# User data — workspace files should never be in the repo. The real
+# database lives in the user's container or iCloud Drive folder; if a
+# stray copy lands here it's accidental and shouldn't be committed.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+Assets/
+Inbox/
+
+# Logs
+*.log
+
+# Claude scratch (in case anything ever lands inside the repo)
+.claude/
+CLAUDE.local.md
