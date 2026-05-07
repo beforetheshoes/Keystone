@@ -18,6 +18,7 @@ struct DatabaseClient: Sendable {
     var updateRecordTitle: @Sendable (_ recordID: String, _ title: String) throws -> Void
     var updatePropertyValue: @Sendable (_ recordID: String, _ key: String, _ value: String) throws -> Void
     var deleteRecord: @Sendable (_ recordID: String) throws -> Void
+    var changeRecordDatabase: @Sendable (_ recordID: String, _ newDatabaseID: String) throws -> Void
 
     var blocks: @Sendable (_ recordID: String) throws -> [BlockRow]
     var createBlock: @Sendable (_ recordID: String, _ after: String?, _ kind: BlockKind, _ text: AttributedString, _ checked: Bool?) throws -> BlockRow
@@ -79,6 +80,7 @@ extension DatabaseClient: DependencyKey {
         updateRecordTitle: { id, title in try dbWrite { try DBWrites.updateRecordTitle($0, recordID: id, title: title) } },
         updatePropertyValue: { id, key, value in try dbWrite { try DBWrites.updatePropertyValue($0, recordID: id, propertyKey: key, value: value) } },
         deleteRecord:    { id in try dbWrite { try DBWrites.deleteRecord($0, recordID: id) } },
+        changeRecordDatabase: { id, newDB in try dbWrite { try DBWrites.changeRecordDatabase($0, recordID: id, newDatabaseID: newDB) } },
         blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id) } },
         createBlock:     { rid, after, kind, text, checked in try dbWrite { try DBWrites.createBlock($0, recordID: rid, after: after, kind: kind, text: text, checked: checked) } },
         updateBlockText: { id, text in try dbWrite { try DBWrites.updateBlockText($0, blockID: id, text: text) } },

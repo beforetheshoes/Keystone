@@ -31,6 +31,10 @@ Databases are grouped into **areas** in the sidebar — `Family`, `Home`, `Mobil
 - `+ New` button on any database view — creates a blank `Untitled` record and opens it.
 - Drag a file onto a record's FILES section — the file becomes an attached asset on that record.
 
+## Changing a record's type
+
+Open a record. The colored type pill below its title (`Person`, `Vehicle`, `Document`, …) is a menu — click it and pick a different database to move the record there. The record's title, glyph, page body, tags, attachments, and any free-form relations carry over. Property values whose key and type also exist in the new database are kept (e.g., `name` survives the move from People to Pets); everything else is dropped, along with any relations bound to a property of the old database. There's no undo, so be deliberate.
+
 ## How records get deleted
 
 Open the record. Click the `⋯` menu in the toolbar. Pick **Delete record**. The record, all its property values, blocks, tags, and relations are removed; attached files are kept (delete those individually if you want).

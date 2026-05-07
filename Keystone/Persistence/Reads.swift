@@ -145,6 +145,29 @@ enum DBReads {
             }
         }
 
+        // Fold relation links into `values` so list/table cells render the
+        // target record's title. Best-effort — if any relation row trips
+        // (e.g. orphaned property_id, broken FK from a sync conflict), we
+        // skip the relation labels rather than failing the whole records
+        // fetch and leaving the table view empty.
+        let relRows: [Row] = (try? Row.fetchAll(db, sql: """
+            SELECT rel.source_record_id, p.key, tr.title AS target_title
+            FROM relations rel
+            JOIN properties p ON p.id = rel.property_id
+            JOIN records tr ON tr.id = rel.target_record_id
+            WHERE rel.source_record_id IN (\(placeholders))
+        """, arguments: StatementArguments(recIDs))) ?? []
+        for row in relRows {
+            guard let rid: String = row["source_record_id"],
+                  let key: String = row["key"],
+                  let title: String = row["target_title"] else { continue }
+            if let existing = byRecord[rid]?[key], !existing.isEmpty {
+                byRecord[rid, default: [:]][key] = existing + ", " + title
+            } else {
+                byRecord[rid, default: [:]][key] = title
+            }
+        }
+
         return recRows.map { row in
             let rid: String = row["id"]
             return RecordRow(
@@ -186,6 +209,26 @@ enum DBReads {
                 values[key] = n.rounded() == n ? String(Int(n)) : String(n)
             } else if let d: String = vrow["date_value"] {
                 values[key] = d
+            }
+        }
+
+        // Fold relation link target titles into `values` so the property
+        // grid's display path sees the same shape as text/number/date.
+        // Best-effort — see the matching block in `records()` for why.
+        let relRows: [Row] = (try? Row.fetchAll(db, sql: """
+            SELECT p.key, tr.title AS target_title
+            FROM relations rel
+            JOIN properties p ON p.id = rel.property_id
+            JOIN records tr ON tr.id = rel.target_record_id
+            WHERE rel.source_record_id = ?
+        """, arguments: [id])) ?? []
+        for vrow in relRows {
+            guard let key: String = vrow["key"],
+                  let title: String = vrow["target_title"] else { continue }
+            if let existing = values[key], !existing.isEmpty {
+                values[key] = existing + ", " + title
+            } else {
+                values[key] = title
             }
         }
 

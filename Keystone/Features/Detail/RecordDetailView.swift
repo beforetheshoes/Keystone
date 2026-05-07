@@ -289,9 +289,30 @@ private struct HeroBlock: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    KstPill(text: db.name.hasSuffix("s") ? String(db.name.dropLast()) : db.name,
-                            background: record.tone.soft,
-                            foreground: record.tone.ink)
+                    Menu {
+                        ForEach(store.databases) { other in
+                            Button {
+                                if other.id != db.id {
+                                    store.send(.changeRecordDatabase(recordID: record.id, newDatabaseID: other.id))
+                                }
+                            } label: {
+                                if other.id == db.id {
+                                    Label(other.name, systemImage: "checkmark")
+                                } else {
+                                    Text(other.name)
+                                }
+                            }
+                        }
+                    } label: {
+                        KstPill(text: db.name.hasSuffix("s") ? String(db.name.dropLast()) : db.name,
+                                background: record.tone.soft,
+                                foreground: record.tone.ink)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .help("Change type — properties not in the new type are dropped")
+
                     if let rel = record.values["relationship"], !rel.isEmpty, rel != "—" {
                         KstPill(text: rel)
                     }

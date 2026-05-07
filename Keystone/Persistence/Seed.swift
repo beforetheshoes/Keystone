@@ -38,6 +38,7 @@ enum Seed {
             DBSeed(key: "homes",       name: "Homes",          plural: "Homes",         icon: "H",  accent: "sage",     area: "area-home",     defaultView: "gallery",   sort: 2),
             DBSeed(key: "maintenance", name: "Maintenance",    plural: "Maintenance",   icon: "M",  accent: "sage",     area: "area-home",     defaultView: "list",      sort: 3),
             DBSeed(key: "vehicles",    name: "Vehicles",       plural: "Vehicles",      icon: "V",  accent: "iris",     area: "area-mobility", defaultView: "table",     sort: 4),
+            DBSeed(key: "vehicle_maintenance", name: "Vehicle Maintenance", plural: "Vehicle Maintenance", icon: "VM", accent: "iris", area: "area-mobility", defaultView: "table", sort: 4.5),
             DBSeed(key: "documents",   name: "Documents",      plural: "Documents",     icon: "D",  accent: "cerulean", area: "area-records",  defaultView: "table",     sort: 5),
             DBSeed(key: "events",      name: "Events & Trips", plural: "Events & Trips",icon: "E",  accent: "amber",    area: "area-plans",    defaultView: "table",     sort: 6),
         ]
@@ -80,6 +81,14 @@ enum Seed {
             PropSeed(db: "vehicles", key: "plate",   label: "Plate",   type: "text",   sort: 4),
             PropSeed(db: "vehicles", key: "vin",     label: "VIN",     type: "text",   sort: 5),
             PropSeed(db: "vehicles", key: "mileage", label: "Mileage", type: "number", sort: 6),
+            // vehicle_maintenance
+            PropSeed(db: "vehicle_maintenance", key: "name",    label: "Title",   type: "title",    sort: 0),
+            PropSeed(db: "vehicle_maintenance", key: "date",    label: "Date",    type: "date",     sort: 1),
+            PropSeed(db: "vehicle_maintenance", key: "vehicle", label: "Vehicle", type: "relation", sort: 2),
+            PropSeed(db: "vehicle_maintenance", key: "kind",    label: "Kind",    type: "select",   sort: 3),
+            PropSeed(db: "vehicle_maintenance", key: "vendor",  label: "Vendor",  type: "text",     sort: 4),
+            PropSeed(db: "vehicle_maintenance", key: "mileage", label: "Mileage", type: "number",   sort: 5),
+            PropSeed(db: "vehicle_maintenance", key: "cost",    label: "Cost",    type: "number",   sort: 6),
             // documents
             PropSeed(db: "documents", key: "name",    label: "Title",      type: "title",    sort: 0),
             PropSeed(db: "documents", key: "kind",    label: "Kind",       type: "select",   sort: 1),
@@ -105,6 +114,7 @@ enum Seed {
                 case ("documents", "related"):  return #"{"targetDatabaseID":"people"}"#
                 case ("events", "with"):        return #"{"targetDatabaseID":"people"}"#
                 case ("maintenance", "home"):   return #"{"targetDatabaseID":"homes"}"#
+                case ("vehicle_maintenance", "vehicle"): return #"{"targetDatabaseID":"vehicles"}"#
                 default:                        return "{}"
                 }
             }()
