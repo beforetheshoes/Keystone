@@ -1,5 +1,6 @@
 import Foundation
 import ComposableArchitecture
+@preconcurrency import SQLiteData
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -137,6 +138,7 @@ struct AppFeature {
         case updateRecordTitle(recordID: String, title: String)
         case updatePropertyValue(recordID: String, key: String, value: String)
         case deleteCurrentRecord
+        case changeRecordDatabase(recordID: String, newDatabaseID: String)
         case refreshSidebar
         case sidebarRefreshed(databases: [DBRow], palette: [PaletteItem])
         case refreshCurrentRecords
@@ -175,6 +177,7 @@ struct AppFeature {
         case assetImported(AssetRecord)
         case deleteAsset(assetID: String)
         case openAsset(assetID: String)
+        case quickLookAsset(assetID: String)
 
         // Cover image
         case setCoverImage(recordID: String, fileURL: URL)
@@ -184,6 +187,14 @@ struct AppFeature {
 
     @Dependency(\.databaseClient) var dbClient
     @Dependency(\.syncEngineClient) var syncClient
+
+    /// True when the prior status was already a settled sync state. Used
+    /// to gate the sidebar refresh on `.synced` so we only do work on the
+    /// transition from "syncing/local" → "synced", not on every poll.
+    private func isAlreadySynced(_ status: AppFeature.SyncStatus) -> Bool {
+        if case .synced = status { return true }
+        return false
+    }
 
     var body: some ReducerOf<Self> {
         BindingReducer()
@@ -209,6 +220,28 @@ struct AppFeature {
                         try? await syncClient.start()
                         for await status in syncClient.observeStatus() {
                             await send(.syncStatusChanged(status))
+                        }
+                    },
+                    .run { _ in
+                        // Diagnostic: periodic census so we can see in the
+                        // log whether records vanish after boot (e.g. due
+                        // to SyncEngine pulling tombstones from CloudKit
+                        // or iCloud Drive replacing the SQLite file).
+                        // Snapshots at 0/5/15/30/60s, then every 5min.
+                        let snapshots: [UInt64] = [
+                            0, 5, 15, 30, 60, 300, 600, 1200,
+                        ]
+                        let url = AppDatabase.databaseFolder
+                            .appendingPathComponent("workspace.sqlite")
+                        for delay in snapshots {
+                            if delay > 0 {
+                                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                            }
+                            @Dependency(\.defaultDatabase) var database
+                            try? await database.read { db in
+                                logDBCensus(db, label: "runtime+\(delay)s")
+                            }
+                            logFileState(at: url, label: "runtime+\(delay)s")
                         }
                     },
                     .run { send in
@@ -449,6 +482,15 @@ struct AppFeature {
                     try? dbClient.updatePropertyValue(recordID, key, value)
                 }
 
+            case let .changeRecordDatabase(recordID, newDatabaseID):
+                guard state.currentRecord?.id == recordID,
+                      state.currentRecord?.databaseID != newDatabaseID else { return .none }
+                return .run { send in
+                    try? dbClient.changeRecordDatabase(recordID, newDatabaseID)
+                    await send(.refreshSidebar)
+                    await send(.setNav(.record(databaseID: newDatabaseID, recordID: recordID)))
+                }
+
             case .deleteCurrentRecord:
                 guard let rec = state.currentRecord else { return .none }
                 let dbID = rec.databaseID
@@ -666,7 +708,18 @@ struct AppFeature {
                 }
 
             case let .syncStatusChanged(status):
+                let prior = state.syncStatus
                 state.syncStatus = status
+                // When sync finishes a fetch/push cycle, the local DB may
+                // have new rows that didn't exist at boot — refresh the
+                // sidebar counts and the currently-visible record list so
+                // the UI matches reality without forcing a relaunch.
+                if case .synced = status, !isAlreadySynced(prior) {
+                    return .merge(
+                        .send(.refreshSidebar),
+                        .send(.refreshCurrentRecords)
+                    )
+                }
                 return .none
 
             case let .assetsLoaded(assets):
@@ -711,6 +764,23 @@ struct AppFeature {
                     await MainActor.run {
                         #if canImport(AppKit)
                         _ = NSWorkspace.shared.open(url)
+                        #elseif canImport(UIKit)
+                        UIApplication.shared.open(url)
+                        #endif
+                    }
+                }
+
+            case let .quickLookAsset(assetID):
+                // macOS-only: pop a Quick Look floating panel beside the
+                // app so the user can reference the file while editing.
+                // iOS doesn't have an equivalent floating preview, so
+                // fall back to the regular open path.
+                guard let asset = state.currentRecordAssets.first(where: { $0.id == assetID }) else { return .none }
+                let url = asset.absoluteURL
+                return .run { _ in
+                    await MainActor.run {
+                        #if canImport(AppKit)
+                        QuickLookManager.shared.present(urls: [url])
                         #elseif canImport(UIKit)
                         UIApplication.shared.open(url)
                         #endif

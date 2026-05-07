@@ -58,7 +58,7 @@ struct HomeView: View {
                                 }
                             }
                             .gridCellColumns(1)
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                             HomePanel(title: "Family",
                                       onMore: { store.send(.setNav(.database("people"))) }) {
@@ -69,7 +69,7 @@ struct HomeView: View {
                                 }
                             }
                             .gridCellColumns(1)
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         GridRow {
                             HomePanel(title: "House & maintenance",
@@ -79,7 +79,7 @@ struct HomeView: View {
                                 }
                             }
                             .gridCellColumns(1)
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                             HomePanel(title: "Expiring documents",
                                       onMore: { store.send(.setNav(.database("documents"))) }) {
@@ -91,7 +91,7 @@ struct HomeView: View {
                                 }
                             }
                             .gridCellColumns(1)
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 }
@@ -213,6 +213,13 @@ private struct HomePanel<Content: View>: View {
     var onMore: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
+    /// Floor height for every panel. Without this, an empty panel is
+    /// just-its-header tall and the 2×2 grid renders four tiles of
+    /// wildly different sizes when one has content and the rest don't.
+    /// Set to roughly 3 rows of typical row content + header padding;
+    /// taller content (more rows) will still grow the panel naturally.
+    private static var minHeight: CGFloat { 168 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -233,16 +240,30 @@ private struct HomePanel<Content: View>: View {
             VStack(alignment: .leading, spacing: 0) {
                 content()
             }
+            // Push content to the top of the panel so partially-filled
+            // tiles don't center their rows in the middle of empty
+            // space.
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(KstColor.paper0)
+        .frame(minHeight: Self.minHeight, alignment: .top)
+        // One rounded shape used for both fill and outline. Earlier code
+        // stacked `background(paper0)` + `overlay(strokeBorder)` +
+        // `clipShape(rounded)` which produced visibly broken borders at
+        // tile corners — the rect-shaped background got clipped to the
+        // rounded shape while the stroke drew at the *inside* of the
+        // path, so half the stroke disappeared into the clipped region
+        // where the geometry didn't quite line up.
+        .background(
+            RoundedRectangle(cornerRadius: KstRadius.r3, style: .continuous)
+                .fill(KstColor.paper0)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: KstRadius.r3, style: .continuous)
-                .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+                .stroke(KstColor.ink4, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: KstRadius.r3, style: .continuous))
     }
 }
 
