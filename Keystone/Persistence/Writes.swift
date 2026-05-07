@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import os
 
 enum DBWrites {
     static func createRecord(_ db: Database, databaseID: String, title: String) throws -> RecordRow {
@@ -35,15 +36,75 @@ enum DBWrites {
     static func updateRecordTitle(_ db: Database, recordID: String, title: String) throws {
         let now = AppDatabase.isoFormatter.string(from: Date())
         let glyph = makeGlyph(from: title)
+
+        // Capture the old title (and database name) BEFORE the update
+        // so we can rename the asset folder on disk to match the new
+        // title. The folder layout is
+        // `Assets/<Database>/<Title>-<shortID>/...`; if the sanitized
+        // title changes, we move the folder and patch every asset's
+        // `relative_path` to point at the new location.
+        let priorRow = try Row.fetchOne(db, sql: """
+            SELECT r.title AS title, d.name AS db_name
+            FROM records r
+            JOIN databases d ON d.id = r.database_id
+            WHERE r.id = ?
+        """, arguments: [recordID])
+
         try db.execute(
             sql: "UPDATE records SET title = ?, glyph = ?, updated_at = ? WHERE id = ?",
             arguments: [title, glyph, now, recordID]
         )
+
+        guard let priorRow else { return }
+        let oldTitle: String = priorRow["title"]
+        let dbName: String = priorRow["db_name"]
+        let dbDir = AssetPathing.sanitize(dbName)
+        let oldRecDir = AssetPathing.recordFolderName(title: oldTitle, recordID: recordID)
+        let newRecDir = AssetPathing.recordFolderName(title: title, recordID: recordID)
+        guard oldRecDir != newRecDir else { return }
+
+        let assetsRoot = AppDatabase.workspaceFolder
+            .appendingPathComponent("Assets", isDirectory: true)
+            .appendingPathComponent(dbDir, isDirectory: true)
+        let oldFolder = assetsRoot.appendingPathComponent(oldRecDir, isDirectory: true)
+        let newFolder = assetsRoot.appendingPathComponent(newRecDir, isDirectory: true)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: oldFolder.path) {
+            try? fm.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+            do {
+                try fm.moveItem(at: oldFolder, to: newFolder)
+                try db.execute(
+                    sql: """
+                        UPDATE assets
+                        SET relative_path = REPLACE(
+                                relative_path,
+                                ?,
+                                ?
+                            ),
+                            updated_at = ?
+                        WHERE record_id = ?
+                          AND relative_path LIKE ?
+                    """,
+                    arguments: [
+                        "Assets/\(dbDir)/\(oldRecDir)/",
+                        "Assets/\(dbDir)/\(newRecDir)/",
+                        now,
+                        recordID,
+                        "Assets/\(dbDir)/\(oldRecDir)/%"
+                    ]
+                )
+            } catch {
+                // Best-effort. If the move fails (locked file, iCloud
+                // not-yet-uploaded, etc.) leave the old folder in place;
+                // its assets still resolve via their stored
+                // `relative_path` which we haven't touched.
+            }
+        }
     }
 
     static func updatePropertyValue(_ db: Database, recordID: String, propertyKey: String, value: String) throws {
         guard let row = try Row.fetchOne(db, sql: """
-            SELECT p.id AS prop_id, p.type AS prop_type, r.database_id AS db_id
+            SELECT p.id AS prop_id, p.type AS prop_type, p.config_json AS prop_config, r.database_id AS db_id
             FROM records r
             JOIN properties p ON p.database_id = r.database_id AND p.key = ?
             WHERE r.id = ?
@@ -51,14 +112,87 @@ enum DBWrites {
 
         let propID: String = row["prop_id"]
         let propType: String = row["prop_type"]
+        let propConfig: String = row["prop_config"] ?? "{}"
         let now = AppDatabase.isoFormatter.string(from: Date())
         let pvID = "\(recordID).\(propertyKey)"
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Relation properties are stored as `relations` rows, not text in
+        // `property_values`. Try to resolve the incoming string to a record
+        // by title in the configured target database; if found, replace any
+        // existing single-property relation. If not found, fall through to
+        // text storage so a later backfill can promote it once the target
+        // exists.
+        if propType == "relation" {
+            // Always clear prior link state for this (source, property)
+            // first — both real relations and any text fallback. This keeps
+            // the property single-valued from the user's perspective.
+            try db.execute(
+                sql: "DELETE FROM relations WHERE source_record_id = ? AND property_id = ?",
+                arguments: [recordID, propID]
+            )
+            try db.execute(
+                sql: "DELETE FROM property_values WHERE id = ?",
+                arguments: [pvID]
+            )
+
+            if trimmed.isEmpty {
+                try db.execute(
+                    sql: "UPDATE records SET updated_at = ? WHERE id = ?",
+                    arguments: [now, recordID]
+                )
+                return
+            }
+
+            // Pull targetDatabaseID out of the property's config JSON.
+            let targetDB: String? = {
+                guard let data = propConfig.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                return obj["targetDatabaseID"] as? String
+            }()
+
+            if let targetDB,
+               let targetID = try String.fetchOne(
+                   db,
+                   sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
+                   arguments: [targetDB, trimmed]
+               ) {
+                let relID = UUID().uuidString
+                try db.execute(
+                    sql: """
+                        INSERT INTO relations (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                        VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                    """,
+                    arguments: [relID, recordID, targetID, propID, now, now]
+                )
+                try db.execute(
+                    sql: "UPDATE records SET updated_at = ? WHERE id = ?",
+                    arguments: [now, recordID]
+                )
+                return
+            }
+
+            // Target not found yet — store as text so backfillRelationsByTitle
+            // can promote it later.
+            try db.execute(
+                sql: """
+                    INSERT INTO property_values (id, record_id, property_id, text_value, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [pvID, recordID, propID, trimmed, now, now]
+            )
+            try db.execute(
+                sql: "UPDATE records SET updated_at = ? WHERE id = ?",
+                arguments: [now, recordID]
+            )
+            return
+        }
 
         var textValue: String? = nil
         var numberValue: Double? = nil
         var dateValue: String? = nil
 
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch propType {
         case "number":
             if let n = Double(trimmed) { numberValue = n }
@@ -92,7 +226,200 @@ enum DBWrites {
     }
 
     static func deleteRecord(_ db: Database, recordID: String) throws {
+        // Log every record deletion so the boot trace log can prove whether
+        // record loss came from explicit user action vs. some other path
+        // (sync, FK cascade, migration).
+        let title = (try? String.fetchOne(db, sql: "SELECT title FROM records WHERE id = ?", arguments: [recordID])) ?? "?"
+        let dbID = (try? String.fetchOne(db, sql: "SELECT database_id FROM records WHERE id = ?", arguments: [recordID])) ?? "?"
+        os_log(.default, log: OSLog(subsystem: "Keystone", category: "Boot"), "deleteRecord %{public}@ (db=%{public}@ title=%{public}@)", recordID, dbID, title)
         try db.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [recordID])
+    }
+
+    /// Sweep records that have a `.md` asset attached but no editor
+    /// blocks, parse the asset's body, and populate the record's NOTES
+    /// section with the resulting blocks. Idempotent — records that
+    /// already have any block (deleted or not) are skipped, so this is
+    /// safe to call on every boot. Returns the number of records that
+    /// got blocks populated.
+    @discardableResult
+    static func backfillBlocksFromMarkdownAssets(_ db: Database) throws -> Int {
+        // Records that have at least one .md asset and zero blocks.
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT r.id AS record_id, a.relative_path AS md_path
+            FROM records r
+            JOIN assets a ON a.record_id = r.id AND LOWER(a.file_extension) = 'md'
+            WHERE r.deleted_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.record_id = r.id)
+            ORDER BY r.id
+        """)
+        var done = 0
+        for row in rows {
+            let recordID: String = row["record_id"]
+            let path: String = row["md_path"]
+            let url = AppDatabase.absoluteURL(forRelativePath: path)
+            guard let source = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let (_, body) = FrontmatterParser.parse(source)
+            let parsed = MarkdownBlockConverter.parse(body)
+            var lastID: String? = nil
+            for block in parsed {
+                let inserted: BlockRow
+                if block.kind == .table, let table = block.tableData {
+                    inserted = try createTableBlock(
+                        db,
+                        recordID: recordID,
+                        after: lastID,
+                        table: table
+                    )
+                } else {
+                    inserted = try createBlock(
+                        db,
+                        recordID: recordID,
+                        after: lastID,
+                        kind: block.kind,
+                        text: block.text,
+                        checked: block.checked
+                    )
+                }
+                lastID = inserted.id
+            }
+            if !parsed.isEmpty { done += 1 }
+        }
+        return done
+    }
+
+    /// Sweep `property_values` rows for `relation` properties and promote
+    /// each matching text value into a real `relations` row whenever the
+    /// target record now exists (matched by title within the relation's
+    /// configured `targetDatabaseID`). Idempotent — safe to call repeatedly.
+    /// Returns the number of links created.
+    @discardableResult
+    static func backfillRelationsByTitle(_ db: Database) throws -> Int {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT pv.id AS pv_id, pv.record_id AS source_id, pv.property_id AS prop_id,
+                   pv.text_value AS title_value, p.config_json AS config
+            FROM property_values pv
+            JOIN properties p ON p.id = pv.property_id
+            WHERE p.type = 'relation' AND pv.text_value IS NOT NULL AND pv.text_value != ''
+        """)
+
+        var created = 0
+        for row in rows {
+            let pvID: String = row["pv_id"]
+            let sourceID: String = row["source_id"]
+            let propID: String = row["prop_id"]
+            let title: String = row["title_value"]
+            let configJSON: String = row["config"] ?? "{}"
+
+            guard let data = configJSON.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let targetDB = obj["targetDatabaseID"] as? String else { continue }
+
+            guard let targetID = try String.fetchOne(
+                db,
+                sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
+                arguments: [targetDB, title]
+            ) else { continue }
+
+            let relID = UUID().uuidString
+            try db.execute(
+                sql: """
+                    INSERT INTO relations (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                    VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                """,
+                arguments: [relID, sourceID, targetID, propID, now, now]
+            )
+            try db.execute(sql: "DELETE FROM property_values WHERE id = ?", arguments: [pvID])
+            created += 1
+        }
+        return created
+    }
+
+    /// Move a record from one database to another. Property values whose
+    /// (key, type) pair exists in both schemas survive and have their
+    /// `property_id` rewritten to the new database's matching property;
+    /// all other values — and any relations bound to a property of the
+    /// old database — are dropped. The `tone` is updated to the new
+    /// database's accent so the glyph color tracks the type. Tags,
+    /// blocks, assets, and the cover all carry over unchanged because
+    /// they aren't database-scoped.
+    static func changeRecordDatabase(_ db: Database, recordID: String, newDatabaseID: String) throws {
+        guard let oldDatabaseID = try String.fetchOne(
+            db,
+            sql: "SELECT database_id FROM records WHERE id = ?",
+            arguments: [recordID]
+        ) else {
+            throw NSError(domain: "Keystone", code: 1, userInfo: [NSLocalizedDescriptionKey: "Record not found: \(recordID)"])
+        }
+        if oldDatabaseID == newDatabaseID { return }
+
+        guard let newDB = try DBReads.database(db, id: newDatabaseID) else {
+            throw NSError(domain: "Keystone", code: 1, userInfo: [NSLocalizedDescriptionKey: "Database not found: \(newDatabaseID)"])
+        }
+
+        // Drop property values that don't have a same-(key,type) match in
+        // the new schema. The LEFT JOIN finds rows whose new-schema match
+        // is missing.
+        try db.execute(
+            sql: """
+                DELETE FROM property_values
+                WHERE id IN (
+                    SELECT pv.id FROM property_values pv
+                    JOIN properties op ON op.id = pv.property_id
+                    LEFT JOIN properties np
+                      ON np.database_id = ? AND np.key = op.key AND np.type = op.type
+                    WHERE pv.record_id = ? AND np.id IS NULL
+                )
+            """,
+            arguments: [newDatabaseID, recordID]
+        )
+
+        // Rewrite the surviving values' property_id to the new database's
+        // matching property. The pvID (`<recordID>.<key>`) doesn't change.
+        try db.execute(
+            sql: """
+                UPDATE property_values
+                SET property_id = (
+                    SELECT np.id FROM properties np
+                    JOIN properties op ON op.id = property_values.property_id
+                    WHERE np.database_id = ?
+                      AND np.key = op.key
+                      AND np.type = op.type
+                    LIMIT 1
+                ),
+                updated_at = ?
+                WHERE record_id = ?
+            """,
+            arguments: [newDatabaseID, AppDatabase.isoFormatter.string(from: Date()), recordID]
+        )
+
+        // Relations bound to a property of the old database don't make
+        // sense after the move; drop them. Property-less relations are
+        // free-form and stay.
+        try db.execute(
+            sql: """
+                DELETE FROM relations
+                WHERE (source_record_id = ? OR target_record_id = ?)
+                  AND property_id IN (SELECT id FROM properties WHERE database_id = ?)
+            """,
+            arguments: [recordID, recordID, oldDatabaseID]
+        )
+
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let nextSort = (try Double.fetchOne(
+            db,
+            sql: "SELECT MAX(sort_index) FROM records WHERE database_id = ?",
+            arguments: [newDatabaseID]
+        ) ?? -1) + 1
+
+        try db.execute(
+            sql: """
+                UPDATE records
+                SET database_id = ?, tone = ?, sort_index = ?, updated_at = ?
+                WHERE id = ?
+            """,
+            arguments: [newDatabaseID, newDB.accent.rawValue, nextSort, now, recordID]
+        )
     }
 
     /// Sets (or clears) the cover asset for a record. Passing nil clears it.
@@ -113,6 +440,61 @@ enum DBWrites {
         let asset = try AssetImporter.importFile(db, fileURL: fileURL, recordID: recordID, workspaceID: workspaceID)
         try setRecordCover(db, recordID: recordID, assetID: asset.id)
         return asset
+    }
+
+    /// Create a `.table` block carrying tabular data. Tables don't have
+    /// editable text — `text` is empty and the payload lives in
+    /// `tableData`. Returns the inserted row.
+    @discardableResult
+    static func createTableBlock(
+        _ db: Database,
+        recordID: String,
+        after anchorID: String?,
+        table: BlockTableData
+    ) throws -> BlockRow {
+        let id = UUID().uuidString
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let sortIndex = try nextBlockSortIndex(db, recordID: recordID, after: anchorID)
+        let json = BlockContentCodec.encodeTable(table)
+        try db.execute(
+            sql: """
+                INSERT INTO blocks (id, record_id, type, content_json, sort_index, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [id, recordID, BlockKind.table.rawValue, json, sortIndex, now, now]
+        )
+        return BlockRow(
+            id: id,
+            recordID: recordID,
+            kind: .table,
+            text: AttributedString(),
+            checked: nil,
+            tableData: table,
+            sortIndex: sortIndex
+        )
+    }
+
+    /// Compute the next `sort_index` for an inserted block — duplicated
+    /// from the inline closure inside `createBlock` so `createTableBlock`
+    /// can reuse the same fractional-key insertion logic without
+    /// duplicating the SQL.
+    private static func nextBlockSortIndex(_ db: Database, recordID: String, after anchorID: String?) throws -> Double {
+        if let anchor = anchorID {
+            let anchorSort = try Double.fetchOne(db, sql: "SELECT sort_index FROM blocks WHERE id = ?", arguments: [anchor]) ?? 0
+            let nextSort = try Double.fetchOne(db, sql: """
+                SELECT MIN(sort_index) FROM blocks
+                WHERE record_id = ? AND deleted_at IS NULL AND sort_index > ?
+            """, arguments: [recordID, anchorSort])
+            if let nextSort, nextSort.isFinite {
+                return (anchorSort + nextSort) / 2
+            }
+            return anchorSort + 1
+        } else {
+            let max = try Double.fetchOne(db, sql: """
+                SELECT MAX(sort_index) FROM blocks WHERE record_id = ? AND deleted_at IS NULL
+            """, arguments: [recordID]) ?? -1
+            return max + 1
+        }
     }
 
     static func createBlock(_ db: Database, recordID: String, after anchorID: String?, kind: BlockKind, text: AttributedString, checked: Bool? = nil) throws -> BlockRow {
@@ -302,6 +684,14 @@ enum DBWrites {
         if let path = try String.fetchOne(db, sql: "SELECT relative_path FROM assets WHERE id = ?", arguments: [assetID]) {
             let fileURL = AppDatabase.absoluteURL(forRelativePath: path)
             try? FileManager.default.removeItem(at: fileURL)
+            // Prune the now-possibly-empty record folder (and database
+            // folder if it too became empty) so deleting the last asset
+            // for a record doesn't leave an empty `<Title>-<id>/` husk
+            // in the user's `Assets/` tree.
+            AssetPathing.pruneEmptyAncestors(
+                fileURL.deletingLastPathComponent(),
+                stopAt: AppDatabase.workspaceFolder.appendingPathComponent("Assets", isDirectory: true)
+            )
         }
         try db.execute(sql: "DELETE FROM assets WHERE id = ?", arguments: [assetID])
     }

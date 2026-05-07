@@ -1,6 +1,8 @@
 # Storage location
 
-By default, Keystone keeps your workspace inside its sandboxed app container — safe and private, but invisible in Finder. Settings (⌘,) lets you move that data somewhere you can actually see.
+The setting in Settings → Storage controls **where your files (`Inbox/` and `Assets/`) live** — somewhere you can see them in Finder/Files.app, or somewhere private to this device. The **database itself (`workspace.sqlite`) is always sandbox-private** regardless of which option you pick. That's a deliberate split: file-syncing services (iCloud Drive, Dropbox, Syncthing) can replace bytes mid-session and corrupt or destroy a live SQLite database. Records are synced device-to-device by CloudKit's row-level engine instead, which understands transactions and conflicts.
+
+So: pick where your *files* go. Records sync separately and safely.
 
 ## Three options
 
@@ -34,26 +36,25 @@ Files synced this way include the SQLite database (`workspace.sqlite`) and every
 
 ## What happens when you switch
 
-Keystone copies your existing `workspace.sqlite` and `Assets/` into the new location, points the preference at it, and asks you to **quit and reopen** so the still-open database connection can swap. The old copy stays where it is — Keystone never deletes it during a switch. Once you've confirmed the new location is happy, you can delete the old one yourself if you want the disk space back.
+Keystone copies your existing `Assets/` and `Inbox/` into the new location and points the preference at it. The old copy stays where it is — Keystone never deletes it. Once you've confirmed the new location is happy, you can delete the old one yourself if you want the disk space back.
 
-If anything fails mid-copy (disk full, permissions, network glitch on iCloud), Keystone aborts the switch and leaves you on the previous location. No partial state.
-
-## Multi-device caveat
-
-iCloud Drive is great for **single-device-at-a-time** use. Open Keystone on your Mac, edit some records, close it, then open the iPhone — works fine. Open it on **both** at the same time and start writing to the SQLite file from each, and you risk corruption (SQLite isn't designed for that). For seamless concurrent multi-device editing, lean on the CloudKit row-level sync (`SyncEngine`) — that's an additive layer that operates separately and handles conflicts at the row level instead of the file level.
+The database doesn't move when you switch storage — it stays at `~/Library/Containers/com.ryanleewilliams.keystone/Data/Library/Application Support/Keystone/workspace.sqlite` regardless. CloudKit handles record sync to other devices.
 
 ## Where each piece goes
 
-Wherever the workspace folder ends up, the structure is the same:
-
 ```
-<workspace folder>/
-  workspace.sqlite          # database
-  workspace.sqlite-wal      # write-ahead log (transient)
-  workspace.sqlite-shm      # shared memory (transient)
+<workspace folder, per Settings>/
+  Inbox/
+    README.md
+    <files you drop here get auto-imported>
   Assets/
     a4f8…d2.jpg             # imported files, named by content hash
     …
+
+~/Library/Containers/com.ryanleewilliams.keystone/Data/Library/Application Support/Keystone/
+  workspace.sqlite          # database — always here, never in iCloud Drive
+  workspace.sqlite-wal      # write-ahead log (transient)
+  workspace.sqlite-shm      # shared memory (transient)
 ```
 
 The asset filenames are content hashes — drop one into a Markdown editor or another database and the hash is the stable identity.
