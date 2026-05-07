@@ -8,8 +8,42 @@ The whole point: you can add records by saving a file from Finder, the Files app
 
 1. **Drop a file** into `<workspace folder>/Inbox/`. From any device, any app — anywhere that can save to a folder.
 2. **Keystone notices** within a second of the next time it's running and the folder change syncs (instant on the device that did the drop, ~seconds for other devices via iCloud Drive).
-3. **A new record appears** in your **Documents** database. Title is the original filename without extension. The original file is attached as both an asset and the record's cover image (if it's an image).
+3. **A new record appears.** By default it lands in **Documents**, but a Markdown file with a `type:` frontmatter line lands in whichever database that names — see below. Title is the frontmatter `title:` if set, otherwise the filename without extension.
 4. **The Inbox folder empties.** The original file moves to `Assets/` under a content-hashed name. Empty Inbox = "all imports are processed."
+
+## Setting the type via frontmatter
+
+Drop a Markdown file (`.md` / `.markdown`) whose first lines are a YAML frontmatter block, and Keystone uses it to route the import:
+
+```
+---
+type: vehicles
+title: 2019 Subaru Outback
+make: Subaru
+model: Outback
+year: 2019
+plate: ABC-123
+---
+
+Anything down here is the body — kept verbatim with the attached source file.
+```
+
+- `type:` must match a database id exactly (case-insensitive). The seeded ids are `people`, `pets`, `homes`, `maintenance`, `vehicles`, `documents`, and `events`. Anything else falls back to **Documents**.
+- `title:` becomes the new record's title. Without it, the filename (minus extension) wins.
+- Every other key is matched against that database's property keys. In the example above, `make`, `model`, `year`, and `plate` all line up with seeded Vehicle properties and get filled in. Unknown keys are ignored.
+- Values are taken raw — quoted strings are unwrapped, but lists, nested maps, and folded scalars aren't supported. For dates, write ISO 8601 (`2019-04-12`).
+- The Markdown source file itself is always attached to the new record as an asset, so the original is never lost.
+
+## Folder bundles (markdown + companion)
+
+If you drop a **subfolder** containing exactly one Markdown file plus one other file, and the Markdown body mentions the other file's name (`[scan](receipt.pdf)`, `![](receipt.pdf)`, or just the bare filename), the pair imports as a single record:
+
+- The Markdown drives the type/title/properties (per the frontmatter rules above).
+- The companion file is attached to that same record. It does **not** become the cover.
+
+Folders that don't fit the bundle pattern have each file imported individually as if it had been dropped at the top level. Either way, the folder is removed when its contents have been processed.
+
+Only one level of nesting is examined — files inside sub-subfolders are ignored.
 
 ## Where the Inbox lives
 
@@ -34,9 +68,8 @@ If you're using a custom folder or the App container, the Inbox is at `<that fol
 
 ## What it doesn't do (yet)
 
-- **Filing into the right database.** Everything lands in **Documents** for now; you can move records by editing the database property if needed.
-- **Watching subfolders.** Top-level files only. Nested folders are skipped.
-- **Custom rename / template hooks.** Title is just the filename minus extension.
+- **Recursive folder watches.** Only the top level of `Inbox/` plus one level of subfolders is examined. Files nested deeper are skipped.
+- **Full YAML.** Frontmatter parsing handles `key: value` pairs and quoted strings. Lists, nested maps, and folded scalars aren't supported.
 - **Deleting from app removes from filesystem.** If you delete a record in the app, the asset file stays in `Assets/`. (You can clear orphaned assets manually for now.)
 
 These are all reasonable next steps once you've used the basic flow for a bit.

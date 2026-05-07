@@ -134,10 +134,13 @@ final class InboxWatcher: @unchecked Sendable {
 
     private func scan(inbox: URL) async {
         let fm = FileManager.default
+        // Enumerate including hidden files so we can detect iCloud
+        // `.<name>.icloud` placeholders and trigger downloads instead of
+        // letting them slip past as "nothing here."
         guard let items = try? fm.contentsOfDirectory(
             at: inbox,
-            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .nameKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey, .nameKey],
+            options: []
         ) else {
             log.info("scan: folder not readable")
             return
@@ -147,32 +150,53 @@ final class InboxWatcher: @unchecked Sendable {
         var importedAny = false
         var skippedFresh = false
         for url in items {
-            // Skip non-files, our own README, and anything that looks like
-            // an iCloud placeholder (extension `.icloud` for files not yet
-            // downloaded — the FS event will fire again once the bytes
-            // arrive locally).
-            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+            // iCloud placeholder for a not-yet-downloaded file. Request the
+            // download and bail; the FS event will refire when bytes arrive.
+            if url.lastPathComponent.hasPrefix(".") && url.pathExtension == "icloud" {
+                log.info("triggering download for \(url.lastPathComponent, privacy: .public)")
+                try? fm.startDownloadingUbiquitousItem(at: url)
+                skippedFresh = true
+                continue
+            }
+            // Other dot-files: skip silently (.DS_Store, app-internal markers).
+            if url.lastPathComponent.hasPrefix(".") { continue }
+
+            let resVals = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey])
+            let isFile = resVals?.isRegularFile ?? false
+            let isDir = resVals?.isDirectory ?? false
+
+            if isDir {
+                do {
+                    let result = try await processDirectory(folder: url, depth: 1)
+                    if result.imported { importedAny = true }
+                    if result.skippedFresh { skippedFresh = true }
+                } catch {
+                    log.error("subfolder import failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+                continue
+            }
+
             guard isFile else {
                 log.info("skip non-file \(url.lastPathComponent, privacy: .public)")
                 continue
             }
             if url.lastPathComponent == "README.md" { continue }
             if url.pathExtension == "icloud" {
-                log.info("skip iCloud placeholder \(url.lastPathComponent, privacy: .public)")
+                log.info("triggering download for \(url.lastPathComponent, privacy: .public)")
+                try? fm.startDownloadingUbiquitousItem(at: url)
+                skippedFresh = true
                 continue
             }
 
-            if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey])).flatMap(\.contentModificationDate) {
-                if Date().timeIntervalSince(mtime) < 2.0 {
-                    log.info("skip too-fresh \(url.lastPathComponent, privacy: .public)")
-                    skippedFresh = true
-                    continue
-                }
+            if let mtime = resVals?.contentModificationDate, Date().timeIntervalSince(mtime) < 2.0 {
+                log.info("skip too-fresh \(url.lastPathComponent, privacy: .public)")
+                skippedFresh = true
+                continue
             }
 
             do {
                 log.info("importing \(url.lastPathComponent, privacy: .public)")
-                if try await importOne(url: url) {
+                if try await importTopLevelFile(url: url) {
                     importedAny = true
                     log.info("imported \(url.lastPathComponent, privacy: .public)")
                 } else {
@@ -201,73 +225,181 @@ final class InboxWatcher: @unchecked Sendable {
         }
     }
 
-    /// Import a single file. Returns `true` if a new record was created,
-    /// `false` if the file was a duplicate of something already in the
-    /// workspace (still removes it from the inbox so the user knows it
-    /// was processed).
-    private func importOne(url: URL) async throws -> Bool {
+    /// Top-level inbox file: route to InboxImporter based on extension.
+    private func importTopLevelFile(url: URL) async throws -> Bool {
         @Dependency(\.defaultDatabase) var database
 
-        let data = try Data(contentsOf: url)
-        let hashHex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let originalFilename = url.lastPathComponent
-        let titleBase = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let isMarkdown = (ext == "md" || ext == "markdown")
 
-        // Dedupe: if we already have an asset with this content hash,
-        // treat the inbox drop as a no-op and clean it up so the user's
-        // folder stays empty.
-        let existingHash = try await database.read { db in
-            try String.fetchOne(
-                db,
-                sql: "SELECT id FROM assets WHERE content_hash = ? LIMIT 1",
-                arguments: [hashHex]
-            )
-        }
-        if existingHash != nil {
-            try? FileManager.default.removeItem(at: url)
-            return false
-        }
-
-        // Make sure a "documents" database exists; structural seed
-        // creates it on first launch but we guard defensively.
-        let docsExists = try await database.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM databases WHERE id = 'documents'") ?? 0
-        }
-        guard docsExists > 0 else { return false }
-
-        try await database.write { db in
-            // Create the host record and import the file as an attached
-            // asset in one transaction so partial failure can't leave a
-            // titleless record without its file.
-            let record = try DBWrites.createRecord(db, databaseID: "documents", title: titleBase)
-            let asset = try AssetImporter.importFile(
-                db,
-                fileURL: url,
-                recordID: record.id,
-                workspaceID: Seed.workspaceID
-            )
-
-            // If the asset is an image, promote it to the record's cover
-            // so the new Documents row has a real thumbnail right away.
-            if let mime = asset.mimeType, mime.hasPrefix("image/") {
-                try DBWrites.setRecordCover(db, recordID: record.id, assetID: asset.id)
+        let outcome = try await database.write { db -> InboxImporter.Outcome in
+            if isMarkdown {
+                return try InboxImporter.importMarkdown(db, url: url, companion: nil)
             } else {
-                // Non-image: still set the original filename as a hint
-                // value on the `kind` property so the table view shows
-                // something useful.
-                try DBWrites.updatePropertyValue(
-                    db,
-                    recordID: record.id,
-                    propertyKey: "kind",
-                    value: originalFilename
-                )
+                return try InboxImporter.importOpaque(db, url: url)
+            }
+        }
+        return outcome.imported
+    }
+
+    private struct SubfolderResult {
+        var imported: Bool = false
+        var skippedFresh: Bool = false
+    }
+
+    /// Maximum depth processDirectory will recurse to. The Cars/ archive
+    /// the importer was designed for sits at depth 4 (`Inbox/Cars/<vehicle>/<doc>/<file>`);
+    /// 8 leaves headroom for messier real-world drops without risking a
+    /// runaway walk on a misconfigured drop target.
+    private static let maxRecursionDepth = 8
+
+    /// Walk a directory tree dropped into the inbox. At each level:
+    ///
+    /// 1. If the folder looks like a leaf bundle (exactly one `.md`/`.markdown`
+    ///    plus one companion file, where the markdown body mentions the
+    ///    companion's filename), import as a single typed record with the
+    ///    companion attached.
+    /// 2. Otherwise, import each settled regular file at this level using
+    ///    the same routing as top-level files, then recurse into any
+    ///    subdirectories.
+    ///
+    /// Folders are removed once their contents have been processed, so
+    /// "empty Inbox" continues to mean "everything caught up". Recursion
+    /// stops at `maxRecursionDepth` to bound the walk.
+    private func processDirectory(folder: URL, depth: Int) async throws -> SubfolderResult {
+        @Dependency(\.defaultDatabase) var database
+        let fm = FileManager.default
+        var result = SubfolderResult(imported: false, skippedFresh: false)
+
+        guard depth <= Self.maxRecursionDepth else {
+            log.info("recursion depth cap hit at \(folder.path, privacy: .public)")
+            return result
+        }
+
+        // Enumerate WITHOUT skipping hidden files so we can see iCloud
+        // `.<name>.icloud` placeholders. Treat each placeholder as
+        // "in-flight" — request the download from iCloud and mark the
+        // scan as having seen fresh items so a follow-up scan retries
+        // once the file has materialized.
+        let items = try fm.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey],
+            options: []
+        )
+
+        var settled: [URL] = []
+        var subdirs: [URL] = []
+        for url in items {
+            // iCloud not-yet-downloaded placeholder. Hidden because of
+            // the leading dot. Ask iCloud to materialize the real file;
+            // the FS event will fire again and we'll see the live file
+            // on the next scan.
+            if url.lastPathComponent.hasPrefix(".") && url.pathExtension == "icloud" {
+                try? fm.startDownloadingUbiquitousItem(at: url)
+                result.skippedFresh = true
+                continue
+            }
+            // Skip the macOS-noise hidden file unconditionally.
+            if url.lastPathComponent == ".DS_Store" { continue }
+
+            let res = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey])
+            if res?.isDirectory == true {
+                subdirs.append(url)
+                continue
+            }
+            guard res?.isRegularFile == true else { continue }
+            if url.pathExtension == "icloud" {
+                // Defensive: visible-suffix variants do exist in some setups.
+                try? fm.startDownloadingUbiquitousItem(at: url)
+                result.skippedFresh = true
+                continue
+            }
+            if let mtime = res?.contentModificationDate, Date().timeIntervalSince(mtime) < 2.0 {
+                result.skippedFresh = true
+                continue
+            }
+            settled.append(url)
+        }
+
+        // Leaf bundle detection: one .md + one companion file mentioned by
+        // name in the markdown body. Subdirectories must be absent — a
+        // bundle is by definition a leaf.
+        if subdirs.isEmpty,
+           settled.count == 2,
+           let mdIndex = settled.firstIndex(where: { $0.pathExtension.lowercased() == "md" || $0.pathExtension.lowercased() == "markdown" }) {
+            let mdURL = settled[mdIndex]
+            let other = settled[mdIndex == 0 ? 1 : 0]
+            let otherExt = other.pathExtension.lowercased()
+            if otherExt != "md" && otherExt != "markdown",
+               let mdSource = try? String(contentsOf: mdURL, encoding: .utf8),
+               mdSource.contains(other.lastPathComponent) {
+                let outcome = try await database.write { db -> InboxImporter.Outcome in
+                    try InboxImporter.importMarkdown(db, url: mdURL, companion: other)
+                }
+                if outcome.imported { result.imported = true }
+                removeIfEmpty(folder)
+                return result
             }
         }
 
-        // Remove the source file from the inbox once the DB transaction
-        // committed — leaving the inbox empty is the user-visible signal
-        // that import succeeded.
-        try? FileManager.default.removeItem(at: url)
-        return true
+        // Otherwise import each settled file at this level using the
+        // same per-file routing as top-level inbox files.
+        for url in settled {
+            let ext = url.pathExtension.lowercased()
+            let isMarkdown = (ext == "md" || ext == "markdown")
+            do {
+                let outcome = try await database.write { db -> InboxImporter.Outcome in
+                    if isMarkdown {
+                        return try InboxImporter.importMarkdown(db, url: url, companion: nil)
+                    } else {
+                        return try InboxImporter.importOpaque(db, url: url)
+                    }
+                }
+                if outcome.imported { result.imported = true }
+            } catch {
+                log.error("import failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // Recurse into subdirectories.
+        for sub in subdirs {
+            do {
+                let nested = try await processDirectory(folder: sub, depth: depth + 1)
+                if nested.imported { result.imported = true }
+                if nested.skippedFresh { result.skippedFresh = true }
+            } catch {
+                log.error("nested folder failed at \(sub.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // Best-effort cleanup; if files remain (e.g. an unsupported
+        // dot-file or an unimported companion), the folder stays and the
+        // next scan will see it again.
+        removeIfEmpty(folder)
+        return result
+    }
+
+    /// Remove `folder` only if it has truly no remaining contents — including
+    /// hidden files like iCloud `.<filename>.icloud` placeholders. iCloud
+    /// Drive uses leading-dot placeholders for files that haven't downloaded
+    /// yet, so a "hidden-files-skipped" view of the directory can look empty
+    /// while real files are still pending in the cloud. Using
+    /// `[.skipsHiddenFiles]` here led to the watcher cleaning up dropped
+    /// folders mid-download and leaving the user with no records imported.
+    private func removeIfEmpty(_ folder: URL) {
+        let fm = FileManager.default
+        let remaining = (try? fm.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: []
+        )) ?? []
+        let nonSystem = remaining.filter { url in
+            // `.DS_Store` is the only hidden file we treat as ignorable —
+            // iCloud placeholders, dot-files the user dropped on purpose, etc.
+            // all count as "still pending."
+            url.lastPathComponent != ".DS_Store"
+        }
+        guard nonSystem.isEmpty else { return }
+        try? fm.removeItem(at: folder)
     }
 }
