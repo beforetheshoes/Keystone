@@ -2,7 +2,28 @@ import SwiftUI
 import ComposableArchitecture
 import Dependencies
 
+/// Entry point that gives the binary two personas:
+/// - Default: launch the SwiftUI app via `KeystoneApp.main()` (the
+///   compiler synthesizes that from `App` conformance, regardless of
+///   whether `@main` is present).
+/// - `--cli <command> [args]`: run the headless `KeystoneCLI` against
+///   the same workspace database, then exit.
+///
+/// Detecting the flag *before* SwiftUI's `App.main()` is critical —
+/// once the SwiftUI lifecycle runs there's no way to escape it cleanly,
+/// and we need stdout for JSON output.
 @main
+struct KeystoneEntry {
+    static func main() {
+        let args = CommandLine.arguments
+        if args.count > 1, args[1] == "--cli" {
+            KeystoneCLI.run(arguments: Array(args.dropFirst(2)))
+            return
+        }
+        KeystoneApp.main()
+    }
+}
+
 struct KeystoneApp: App {
     @State private var store: StoreOf<AppFeature>
 
