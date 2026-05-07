@@ -5,6 +5,7 @@ struct BlockRowView: View {
     @Bindable var store: StoreOf<AppFeature>
     var block: BlockRow
     @FocusState.Binding var focusedBlockID: String?
+    var orderedListIndex: Int? = nil
 
     @State private var localText: AttributedString = AttributedString()
     @State private var localSelection = AttributedTextSelection()
@@ -25,31 +26,43 @@ struct BlockRowView: View {
 
     @ViewBuilder
     private var gutter: some View {
-        Menu {
-            Section("Change to") {
-                ForEach(BlockKind.allCases, id: \.self) { kind in
-                    Button(kind.displayName) {
-                        store.send(.blockKindChanged(blockID: block.id, kind: kind))
+        // Only render the menu when the row is hovered AND it's currently
+        // the focused block. Hover alone proved unreliable: rows containing
+        // a TextEditor report hover-true even after the cursor leaves, so
+        // every block ended up with a permanent `…` gutter. Coupling to
+        // focus means the gutter only appears when the user is actively
+        // editing a specific block.
+        if hovering, focusedBlockID == block.id {
+            Menu {
+                Section("Change to") {
+                    ForEach(BlockKind.allCases, id: \.self) { kind in
+                        Button(kind.displayName) {
+                            store.send(.blockKindChanged(blockID: block.id, kind: kind))
+                        }
                     }
                 }
+                Divider()
+                Button("Delete", role: .destructive) {
+                    store.send(.blockDeleted(blockID: block.id, focusPrevious: true))
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(KstColor.ink3)
+                    .frame(width: 20, height: 20)
             }
-            Divider()
-            Button("Delete", role: .destructive) {
-                store.send(.blockDeleted(blockID: block.id, focusPrevious: true))
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(KstColor.ink3)
-                .frame(width: 20, height: 20)
-                .opacity(hovering ? 1 : 0)
+            #if os(macOS)
+            .menuStyle(.borderlessButton)
+            #endif
+            .menuIndicator(.hidden)
+            .frame(width: 24, alignment: .center)
+            .padding(.top, gutterTopPadding)
+        } else {
+            // Reserve the same horizontal slot so block content doesn't
+            // shift left when the menu hides.
+            Color.clear
+                .frame(width: 24, height: 1)
         }
-        #if os(macOS)
-        .menuStyle(.borderlessButton)
-        #endif
-        .menuIndicator(.hidden)
-        .frame(width: 24, alignment: .center)
-        .padding(.top, gutterTopPadding)
     }
 
     @ViewBuilder
@@ -68,6 +81,12 @@ struct BlockRowView: View {
                 onBackspaceEmpty: handleBackspaceEmpty,
                 onShortcut: handleShortcut
             )
+        case .table:
+            if let table = block.tableData {
+                TableBlockBody(table: table)
+            } else {
+                EmptyView()
+            }
         default:
             TextBlockBody(
                 block: block,
@@ -77,7 +96,8 @@ struct BlockRowView: View {
                 localSelection: $localSelection,
                 onSubmit: handleReturn,
                 onBackspaceEmpty: handleBackspaceEmpty,
-                onShortcut: handleShortcut
+                onShortcut: handleShortcut,
+                orderedListIndex: orderedListIndex
             )
         }
     }
@@ -114,6 +134,7 @@ private struct TextBlockBody: View {
     var onSubmit: () -> Void
     var onBackspaceEmpty: () -> Void
     var onShortcut: (BlockKind, AttributedString) -> Void
+    var orderedListIndex: Int? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -158,9 +179,10 @@ private struct TextBlockBody: View {
                 .foregroundStyle(KstColor.ink2)
                 .padding(.top, 2)
         case .numbered:
-            Text("1.")
+            Text("\(orderedListIndex ?? 1).")
                 .font(blockFont)
                 .foregroundStyle(KstColor.ink2)
+                .monospacedDigit()
                 .padding(.top, 2)
         case .quote:
             Rectangle()
@@ -257,6 +279,94 @@ private struct ChecklistBlockBody: View {
                 }
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Read-only table renderer. Lays out cells in a `Grid` with a bold
+/// header row and alternating row backgrounds. Each cell sizes to its
+/// content (no mid-word wrapping); if the table's natural width exceeds
+/// the page, the whole grid scrolls horizontally inside the block.
+///
+/// Why not let cells wrap? SwiftUI's default behavior in a `Grid` will
+/// break long words by character once a column gets squeezed — VINs,
+/// dates, account numbers all end up shattered like "01/16/202\n6".
+/// Sizing cells to natural width and offering horizontal scroll
+/// preserves the data's integrity at the cost of needing a swipe.
+///
+/// To modify a table, regenerate from its `.md` source or convert the
+/// block to a paragraph via the gutter menu.
+private struct TableBlockBody: View {
+    var table: BlockTableData
+
+    /// Soft cap on per-cell width so a single absurdly long cell
+    /// doesn't push the whole table off the right edge of the page.
+    /// Beyond this, cells wrap normally (across line breaks, not
+    /// mid-word).
+    private static let maxCellWidth: CGFloat = 320
+
+    private var columnCount: Int {
+        let dataMax = table.rows.map(\.count).max() ?? 0
+        return max(table.headers.count, dataMax)
+    }
+
+    private func cell(_ row: [String], _ index: Int) -> String {
+        index < row.count ? row[index] : ""
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                if !table.headers.isEmpty {
+                    GridRow {
+                        ForEach(0..<columnCount, id: \.self) { col in
+                            cellView(text: cell(table.headers, col), isHeader: true)
+                        }
+                    }
+                    .background(KstColor.paper2)
+                }
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { rowIndex, row in
+                    GridRow {
+                        ForEach(0..<columnCount, id: \.self) { col in
+                            cellView(text: cell(row, col), isHeader: false)
+                        }
+                    }
+                    .background(rowIndex.isMultiple(of: 2) ? KstColor.paper0 : KstColor.paper1)
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .padding(.horizontal, 1) // breathing room for the stroke
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func cellView(text: String, isHeader: Bool) -> some View {
+        Text(text)
+            .font(.kstText(size: 13, weight: isHeader ? .semibold : .regular))
+            .foregroundStyle(isHeader ? KstColor.ink0 : KstColor.ink1)
+            .multilineTextAlignment(.leading)
+            .lineLimit(nil)
+            // Soft cap on natural width so one giant cell can't blow up
+            // the whole row, but cells of normal length keep their full
+            // width. `fixedSize(horizontal: false, vertical: true)`
+            // tells SwiftUI to use ideal vertical size (allow wrapping
+            // when we hit the cap) but not to compress horizontally
+            // below the natural intrinsic width.
+            .frame(maxWidth: Self.maxCellWidth, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .overlay(alignment: .trailing) {
+                Rectangle().fill(KstColor.ink4).frame(width: 0.5)
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(KstColor.ink4).frame(height: 0.5)
+            }
     }
 }
 

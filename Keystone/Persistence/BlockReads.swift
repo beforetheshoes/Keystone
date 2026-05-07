@@ -7,6 +7,7 @@ struct BlockRow: Equatable, Sendable, Identifiable {
     var kind: BlockKind
     var text: AttributedString
     var checked: Bool?
+    var tableData: BlockTableData?
     var sortIndex: Double
 }
 
@@ -23,12 +24,14 @@ enum BlockReads {
             guard let kind = BlockKind(rawValue: row["type"]) else { return nil }
             let json: String = row["content_json"] ?? "{}"
             let (text, checked) = BlockContentCodec.decode(json)
+            let tableData: BlockTableData? = (kind == .table) ? BlockContentCodec.decodeTable(json) : nil
             return BlockRow(
                 id: row["id"],
                 recordID: row["record_id"],
                 kind: kind,
                 text: text,
                 checked: checked,
+                tableData: tableData,
                 sortIndex: row["sort_index"]
             )
         }

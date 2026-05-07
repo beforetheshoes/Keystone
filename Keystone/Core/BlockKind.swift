@@ -10,6 +10,7 @@ enum BlockKind: String, Codable, Sendable, CaseIterable, Hashable {
     case checklist
     case quote
     case divider
+    case table
 
     var displayName: String {
         switch self {
@@ -22,8 +23,17 @@ enum BlockKind: String, Codable, Sendable, CaseIterable, Hashable {
         case .checklist: "Checklist"
         case .quote:     "Quote"
         case .divider:   "Divider"
+        case .table:     "Table"
         }
     }
 
-    var hasTextContent: Bool { self != .divider }
+    /// True for blocks whose primary payload is the AttributedString
+    /// `text`. Tables and dividers carry their content elsewhere
+    /// (`tableData` and nothing, respectively).
+    var hasTextContent: Bool {
+        switch self {
+        case .divider, .table: false
+        default: true
+        }
+    }
 }
