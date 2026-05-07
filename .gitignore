@@ -64,15 +64,18 @@ AuthKey_*.p8
 # User data — workspace files should never be in the repo. The real
 # database lives in the user's container or iCloud Drive folder; if a
 # stray copy lands here it's accidental and shouldn't be committed.
+# Patterns anchored to repo root so they only catch stray user-data
+# folders, not source-code directories of the same name (we have a
+# Keystone/Features/Assets/ that *is* code).
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
-Assets/
-Inbox/
+/Assets/
+/Inbox/
 # Personal source documents staged at the project root for dev/test
 # imports (e.g. a vehicle-records folder). Private papers shouldn't be
 # checked in even if a contributor leaves them lying around.
-Cars/
+/Cars/
 
 # Logs
 *.log
