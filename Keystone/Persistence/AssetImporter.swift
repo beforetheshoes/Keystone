@@ -4,10 +4,13 @@ import CryptoKit
 import UniformTypeIdentifiers
 
 enum AssetImporter {
-    /// Copy `fileURL` into the workspace's Assets folder, compute hash + mime,
-    /// insert an `assets` row attached to `recordID`. Returns the new record.
-    /// Caller is responsible for security-scoped resource access on `fileURL`
-    /// when needed.
+    /// Copy `fileURL` into the workspace's Assets folder using the
+    /// per-record layout (`Assets/<Database>/<RecordTitle>-<shortID>/<original_filename>`),
+    /// computing the file hash + mime, and inserting an `assets` row
+    /// attached to `recordID`. Returns the new record. When `recordID`
+    /// is nil (orphan import — rare), falls back to the legacy flat
+    /// `Assets/<uuid>.<ext>` layout. Caller is responsible for
+    /// security-scoped resource access on `fileURL` when needed.
     static func importFile(
         _ db: Database,
         fileURL: URL,
@@ -16,32 +19,52 @@ enum AssetImporter {
     ) throws -> AssetRecord {
         try AppDatabase.ensureAssetsFolder()
 
-        // Original filename + extension (lowercased for filesystem hygiene)
         let originalFilename = fileURL.lastPathComponent
         let ext = fileURL.pathExtension.lowercased()
-
-        // Byte size + content hash (SHA-256). For typical attachments this
-        // reads the whole file into memory; OK for documents/photos.
         let data = try Data(contentsOf: fileURL)
         let byteSize = Int64(data.count)
-        let hashDigest = SHA256.hash(data: data)
-        let hashHex = hashDigest.map { String(format: "%02x", $0) }.joined()
-
-        // MIME type via UTI
+        let hashHex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let mimeType: String? = {
             guard !ext.isEmpty,
                   let type = UTType(filenameExtension: ext) else { return nil }
             return type.preferredMIMEType
         }()
 
-        // Stored filename: <uuid>[.ext]
-        let storedID = UUID().uuidString
-        let storedFilename: String = ext.isEmpty ? storedID : "\(storedID).\(ext)"
-        let relativePath = "Assets/\(storedFilename)"
-        let destination = AppDatabase.assetsFolder.appendingPathComponent(storedFilename)
+        let relativePath: String
+        let storedFilename: String
 
-        // Copy file (data is in-memory; write rather than copy to dodge any
-        // sandbox quirks around the source URL after the read).
+        if let recordID,
+           let row = try Row.fetchOne(db, sql: """
+               SELECT r.title AS title, d.name AS db_name
+               FROM records r
+               JOIN databases d ON d.id = r.database_id
+               WHERE r.id = ?
+           """, arguments: [recordID]) {
+            let title: String = row["title"]
+            let dbName: String = row["db_name"]
+
+            let dbDir = AssetPathing.sanitize(dbName)
+            let recDir = AssetPathing.recordFolderName(title: title, recordID: recordID)
+            let folderURL = AppDatabase.workspaceFolder
+                .appendingPathComponent("Assets", isDirectory: true)
+                .appendingPathComponent(dbDir, isDirectory: true)
+                .appendingPathComponent(recDir, isDirectory: true)
+            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+
+            let resolved = AssetPathing.disambiguateFilename(originalFilename, in: folderURL)
+            storedFilename = resolved
+            relativePath = "Assets/\(dbDir)/\(recDir)/\(resolved)"
+        } else {
+            // Orphan / pre-record path. Old-style flat layout with a
+            // UUID-named file so unrelated drops don't collide.
+            let storedID = UUID().uuidString
+            storedFilename = ext.isEmpty ? storedID : "\(storedID).\(ext)"
+            relativePath = "Assets/\(storedFilename)"
+        }
+
+        let destination = AppDatabase.workspaceFolder.appendingPathComponent(relativePath)
+        // Write rather than copy to dodge sandbox quirks around the
+        // source URL after the prior read.
         try data.write(to: destination, options: .atomic)
 
         let now = AppDatabase.isoFormatter.string(from: Date())
