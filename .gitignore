@@ -69,6 +69,10 @@ AuthKey_*.p8
 *.sqlite-shm
 Assets/
 Inbox/
+# Personal source documents staged at the project root for dev/test
+# imports (e.g. a vehicle-records folder). Private papers shouldn't be
+# checked in even if a contributor leaves them lying around.
+Cars/
 
 # Logs
 *.log
