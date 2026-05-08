@@ -21,6 +21,7 @@ When changing or adding a feature in any of these areas, **also update the match
 | Storage location          | [15-storage-location.md](Keystone/Resources/Help/15-storage-location.md) |
 | Inbox folder              | [16-inbox.md](Keystone/Resources/Help/16-inbox.md)                   |
 | Travel area / templates   | [17-travel.md](Keystone/Resources/Help/17-travel.md)                 |
+| Enrichment & API keys     | [18-enrichment.md](Keystone/Resources/Help/18-enrichment.md)         |
 
 ## Process
 

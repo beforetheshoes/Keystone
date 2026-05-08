@@ -36,3 +36,5 @@ Vendors have a built-in helper that fills in phone, website, full address, a com
 Once a vendor is resolved, its detail page shows a **Location** preview tile with a map and an **Open in Maps** button that hands off to the Maps app for directions, hours, photos, and reviews.
 
 The lookup also stores Apple's stable **Place ID** so future re-lookups reuse the exact place even if the business renames or moves.
+
+For Books, Movies, and TV records, similar enrichment runs against Google Books and TMDB. See the **Enrichment & API keys** topic for what each provider fills in and where to paste your keys.

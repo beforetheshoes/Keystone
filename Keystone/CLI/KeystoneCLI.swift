@@ -384,29 +384,67 @@ enum KeystoneCLI {
     /// Walk every vendor record, attempt enrichment, apply blanks-only
     /// (or all fields with `--overwrite`). Reports per-vendor outcomes
     /// so it's clear which vendors got data and which need manual help.
+    ///
+    /// The default target is `vendors` (back-compat with the original
+    /// vendors-only behavior, including `--overwrite` and the per-vendor
+    /// candidate detail in the output). With `--database <key>` the
+    /// command instead drives `EnrichmentService` against the matching
+    /// provider — the per-record output is leaner because the provider
+    /// API doesn't surface candidate detail the way the vendor-specific
+    /// path does.
     private static func enrichAllVendors(args: [String]) throws {
+        let databaseKey = parseValueFlag("--database", from: args) ?? "vendors"
         let overwrite = args.contains("--overwrite")
-        let onlyMissing = args.contains("--only-missing-place-id")
-        @Dependency(\.defaultDatabase) var database
-        let vendorIDs: [String] = try database.read { db in
-            var sql = """
-                SELECT r.id FROM records r
-                WHERE r.database_id = 'vendors' AND r.deleted_at IS NULL
-            """
-            if onlyMissing {
-                sql += """
-                  AND r.id NOT IN (
-                    SELECT pv.record_id FROM property_values pv
-                    WHERE pv.property_id = 'vendors.place_id'
-                      AND pv.text_value IS NOT NULL AND pv.text_value != ''
-                  )
+
+        if databaseKey == "vendors" {
+            let onlyMissing = args.contains("--only-missing-place-id")
+            @Dependency(\.defaultDatabase) var database
+            let vendorIDs: [String] = try database.read { db in
+                var sql = """
+                    SELECT r.id FROM records r
+                    WHERE r.database_id = 'vendors' AND r.deleted_at IS NULL
                 """
+                if onlyMissing {
+                    sql += """
+                      AND r.id NOT IN (
+                        SELECT pv.record_id FROM property_values pv
+                        WHERE pv.property_id = 'vendors.place_id'
+                          AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                      )
+                    """
+                }
+                sql += " ORDER BY r.title"
+                return try String.fetchAll(db, sql: sql)
             }
-            sql += " ORDER BY r.title"
-            return try String.fetchAll(db, sql: sql)
+            let result = runEnrichment(vendorIDs: vendorIDs, overwrite: overwrite)
+            emit(result)
+            return
         }
-        let result = runEnrichment(vendorIDs: vendorIDs, overwrite: overwrite)
-        emit(result)
+
+        if overwrite {
+            stderr("--overwrite is only supported with --database vendors right now")
+            exit(1)
+        }
+
+        // Generic provider path. Drives EnrichmentService.enrichPending,
+        // which walks the registered provider for the requested database.
+        runAsyncBlocking {
+            await EnrichmentService.shared.enrichPending(onlyDatabase: databaseKey)
+        }
+        emit([
+            "database": databaseKey,
+            "outcome": "completed",
+            "note": "see logs for per-record outcomes (subsystem=Keystone, category=Enrichment)",
+        ])
+    }
+
+    /// Parse `--flag value` (two-arg form) out of argv. Returns nil when
+    /// the flag is absent or not followed by a value.
+    private static func parseValueFlag(_ flag: String, from args: [String]) -> String? {
+        guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
+        let v = args[idx + 1]
+        if v.hasPrefix("--") { return nil }
+        return v
     }
 
     private static func runEnrichment(vendorIDs: [String], overwrite: Bool) -> [String: Any] {

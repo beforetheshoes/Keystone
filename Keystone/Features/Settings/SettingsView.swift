@@ -62,6 +62,16 @@ struct SettingsView: View {
             }
 
             Section {
+                ForEach(APIKeyKind.allCases, id: \.rawValue) { kind in
+                    APIKeyRow(kind: kind)
+                }
+            } header: {
+                Text("API Keys")
+            } footer: {
+                Text("Stored in the macOS Keychain, never in app preferences. Keys unlock external lookups for Books and Movies / TV records; Vendors enrichment uses Apple Maps and needs no key.")
+            }
+
+            Section {
                 LabeledContent("Version") {
                     Text(versionString)
                         .font(.kstMono(size: 11))

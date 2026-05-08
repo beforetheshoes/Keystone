@@ -286,30 +286,24 @@ struct AppFeature {
                             await send(.refreshSidebar)
                             await send(.refreshCurrentRecords)
                             // An Inbox import may have auto-created
-                            // vendor stubs (e.g. from `vendor: <name>`
-                            // frontmatter on Vehicle Maintenance
-                            // records). Kick the enrichment service so
-                            // the new stubs get phone/website/address
-                            // from MapKit immediately rather than
-                            // waiting for next launch.
-                            #if canImport(MapKit)
-                            if #available(iOS 26.0, macOS 26.0, *) {
-                                await VendorEnrichmentService.shared.enrichPending()
-                            }
-                            #endif
+                            // records that registered providers can
+                            // enrich (vendor stubs from `vendor: <name>`
+                            // frontmatter; books from `type: books`
+                            // markdown; etc.). Run a pass across every
+                            // available provider so they don't have to
+                            // wait until next launch.
+                            await EnrichmentService.shared.enrichPending()
                         }
                     },
                     .run { _ in
                         // Initial enrichment pass on launch — catches
-                        // vendors that arrived via CloudKit, were
+                        // records that arrived via CloudKit, were
                         // created while the app was offline, or were
                         // left ambiguous on a previous run that the
-                        // user has since resolved manually.
-                        #if canImport(MapKit)
-                        if #available(iOS 26.0, macOS 26.0, *) {
-                            VendorEnrichmentService.shared.start()
-                        }
-                        #endif
+                        // user has since resolved manually. Each
+                        // provider self-gates on availability (e.g.
+                        // TMDB providers no-op without an API key).
+                        EnrichmentService.shared.start()
                     }
                 )
 
