@@ -903,6 +903,122 @@ enum Schema {
         }
     }
 
+    /// v24: introduce the Collections area + four media databases —
+    /// `books`, `movies`, `tv_shows`, `restaurants`. Books / Movies /
+    /// TV are gallery-default (cover-art-forward); Restaurants is
+    /// table-default and reuses MapKit enrichment via a relation to
+    /// the existing `vendors` database.
+    ///
+    /// Status / Price properties carry an `options` config_json so the
+    /// `.select` editor renders a cycle-on-tap pill (per #6's plan)
+    /// rather than a free-form TextField.
+    ///
+    /// Idempotent — `INSERT OR IGNORE` is the established
+    /// reseed-on-known-keys pattern (see v11, v18, v19, v20, v22).
+    /// Skips fresh installs because `Seed.runIfEmpty` writes the same
+    /// rows from a single source of truth on first launch.
+    static func seedCollectionsAreaV24(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        guard let workspaceID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM workspaces ORDER BY created_at LIMIT 1"
+        ) else { return }
+
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO areas (id, workspace_id, title, accent, sort_index)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+            arguments: ["area-collections", workspaceID, "Collections", "iris", 6.0]
+        )
+
+        struct DBRow { let id: String; let name: String; let plural: String; let icon: String; let view: String; let sort: Double }
+        let dbs: [DBRow] = [
+            .init(id: "books",       name: "Books",       plural: "Books",       icon: "B",  view: "gallery", sort: 8.0),
+            .init(id: "movies",      name: "Movies",      plural: "Movies",      icon: "Mo", view: "gallery", sort: 8.1),
+            .init(id: "tv_shows",    name: "TV Shows",    plural: "TV Shows",    icon: "Tv", view: "gallery", sort: 8.2),
+            .init(id: "restaurants", name: "Restaurants", plural: "Restaurants", icon: "Re", view: "table",   sort: 8.3),
+        ]
+        for d in dbs {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO databases
+                        (id, workspace_id, area_id, name, plural_name, icon, accent, default_view, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [d.id, workspaceID, "area-collections", d.name, d.plural, d.icon, "iris", d.view, now, now, d.sort]
+            )
+        }
+
+        struct P { let db: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let vendorsRel = #"{"targetDatabaseID":"vendors"}"#
+        let booksStatus = #"{"options":["to_read","reading","read","abandoned"]}"#
+        let moviesStatus = #"{"options":["to_watch","watched","dropped"]}"#
+        let tvStatus = #"{"options":["to_watch","watching","watched","dropped"]}"#
+        let restStatus = #"{"options":["want_to_try","visited"]}"#
+        let priceRange = #"{"options":["$","$$","$$$","$$$$"]}"#
+        let props: [P] = [
+            // books
+            .init(db: "books", key: "name",           label: "Title",     type: "title",  sort: 0,  cfg: "{}"),
+            .init(db: "books", key: "author",         label: "Author",    type: "text",   sort: 1,  cfg: "{}"),
+            .init(db: "books", key: "isbn",           label: "ISBN",      type: "text",   sort: 2,  cfg: "{}"),
+            .init(db: "books", key: "publisher",      label: "Publisher", type: "text",   sort: 3,  cfg: "{}"),
+            .init(db: "books", key: "published_date", label: "Published", type: "date",   sort: 4,  cfg: "{}"),
+            .init(db: "books", key: "page_count",     label: "Pages",     type: "number", sort: 5,  cfg: "{}"),
+            .init(db: "books", key: "status",         label: "Status",    type: "select", sort: 6,  cfg: booksStatus),
+            .init(db: "books", key: "rating",         label: "Rating",    type: "number", sort: 7,  cfg: "{}"),
+            .init(db: "books", key: "started_date",   label: "Started",   type: "date",   sort: 8,  cfg: "{}"),
+            .init(db: "books", key: "finished_date",  label: "Finished",  type: "date",   sort: 9,  cfg: "{}"),
+            .init(db: "books", key: "notes",          label: "Notes",     type: "text",   sort: 10, cfg: "{}"),
+            // movies
+            .init(db: "movies", key: "name",            label: "Title",         type: "title",  sort: 0, cfg: "{}"),
+            .init(db: "movies", key: "year",            label: "Year",          type: "number", sort: 1, cfg: "{}"),
+            .init(db: "movies", key: "tmdb_id",         label: "TMDB ID",       type: "text",   sort: 2, cfg: "{}"),
+            .init(db: "movies", key: "release_date",    label: "Released",      type: "date",   sort: 3, cfg: "{}"),
+            .init(db: "movies", key: "runtime_minutes", label: "Runtime (min)", type: "number", sort: 4, cfg: "{}"),
+            .init(db: "movies", key: "overview",        label: "Overview",      type: "text",   sort: 5, cfg: "{}"),
+            .init(db: "movies", key: "status",          label: "Status",        type: "select", sort: 6, cfg: moviesStatus),
+            .init(db: "movies", key: "rating",          label: "Rating",        type: "number", sort: 7, cfg: "{}"),
+            .init(db: "movies", key: "watched_date",    label: "Watched",       type: "date",   sort: 8, cfg: "{}"),
+            .init(db: "movies", key: "notes",           label: "Notes",         type: "text",   sort: 9, cfg: "{}"),
+            // tv_shows
+            .init(db: "tv_shows", key: "name",           label: "Title",        type: "title",  sort: 0,  cfg: "{}"),
+            .init(db: "tv_shows", key: "year",           label: "Year",         type: "number", sort: 1,  cfg: "{}"),
+            .init(db: "tv_shows", key: "tmdb_id",        label: "TMDB ID",      type: "text",   sort: 2,  cfg: "{}"),
+            .init(db: "tv_shows", key: "first_air_date", label: "First aired",  type: "date",   sort: 3,  cfg: "{}"),
+            .init(db: "tv_shows", key: "season_count",   label: "Seasons",      type: "number", sort: 4,  cfg: "{}"),
+            .init(db: "tv_shows", key: "episode_count",  label: "Episodes",     type: "number", sort: 5,  cfg: "{}"),
+            .init(db: "tv_shows", key: "overview",       label: "Overview",     type: "text",   sort: 6,  cfg: "{}"),
+            .init(db: "tv_shows", key: "status",         label: "Status",       type: "select", sort: 7,  cfg: tvStatus),
+            .init(db: "tv_shows", key: "rating",         label: "Rating",       type: "number", sort: 8,  cfg: "{}"),
+            .init(db: "tv_shows", key: "last_watched",   label: "Last watched", type: "date",   sort: 9,  cfg: "{}"),
+            .init(db: "tv_shows", key: "notes",          label: "Notes",        type: "text",   sort: 10, cfg: "{}"),
+            // restaurants
+            .init(db: "restaurants", key: "name",         label: "Name",         type: "title",    sort: 0, cfg: "{}"),
+            .init(db: "restaurants", key: "vendor",       label: "Vendor",       type: "relation", sort: 1, cfg: vendorsRel),
+            .init(db: "restaurants", key: "cuisine",      label: "Cuisine",      type: "select",   sort: 2, cfg: "{}"),
+            .init(db: "restaurants", key: "price_range",  label: "Price",        type: "select",   sort: 3, cfg: priceRange),
+            .init(db: "restaurants", key: "rating",       label: "Rating",       type: "number",   sort: 4, cfg: "{}"),
+            .init(db: "restaurants", key: "status",       label: "Status",       type: "select",   sort: 5, cfg: restStatus),
+            .init(db: "restaurants", key: "last_visited", label: "Last visited", type: "date",     sort: 6, cfg: "{}"),
+            .init(db: "restaurants", key: "notes",        label: "Notes",        type: "text",     sort: 7, cfg: "{}"),
+        ]
+        for p in props {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.db).\(p.key)", p.db,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+    }
+
     /// v23: flip the four time-of-day Travel properties from plain `date`
     /// to time-zone-aware `date_tz`. Activities and lodging now carry
     /// instants in the event's local time zone (with the IANA tz id

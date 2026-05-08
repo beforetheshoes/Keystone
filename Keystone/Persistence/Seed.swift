@@ -23,6 +23,7 @@ enum Seed {
             ("area-records",  "Records",  "cerulean", 3),
             ("area-plans",    "Plans",    "amber",    4),
             ("area-travel",   "Travel",   "cerulean", 5),
+            ("area-collections", "Collections", "iris",  6),
         ]
         for a in areas {
             try db.execute(
@@ -47,6 +48,10 @@ enum Seed {
             DBSeed(key: "activities",     name: "Activities",     plural: "Activities",     icon: "Ac", accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.1),
             DBSeed(key: "lodging",        name: "Lodging",        plural: "Lodging",        icon: "L",  accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.2),
             DBSeed(key: "transportation", name: "Transportation", plural: "Transportation", icon: "Tr", accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.3),
+            DBSeed(key: "books",       name: "Books",       plural: "Books",       icon: "B",  accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.0),
+            DBSeed(key: "movies",      name: "Movies",      plural: "Movies",      icon: "Mo", accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.1),
+            DBSeed(key: "tv_shows",    name: "TV Shows",    plural: "TV Shows",    icon: "Tv", accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.2),
+            DBSeed(key: "restaurants", name: "Restaurants", plural: "Restaurants", icon: "Re", accent: "iris", area: "area-collections", defaultView: "table",   sort: 8.3),
         ]
         for d in dbs {
             try db.execute(
@@ -151,12 +156,56 @@ enum Seed {
             PropSeed(db: "transportation", key: "legs",         label: "Legs",   type: "json",     sort: 4),
             PropSeed(db: "transportation", key: "cost",         label: "Cost",   type: "currency", sort: 5),
             PropSeed(db: "transportation", key: "notes",        label: "Notes",  type: "text",     sort: 6),
+            // books
+            PropSeed(db: "books", key: "name",           label: "Title",     type: "title",  sort: 0),
+            PropSeed(db: "books", key: "author",         label: "Author",    type: "text",   sort: 1),
+            PropSeed(db: "books", key: "isbn",           label: "ISBN",      type: "text",   sort: 2),
+            PropSeed(db: "books", key: "publisher",      label: "Publisher", type: "text",   sort: 3),
+            PropSeed(db: "books", key: "published_date", label: "Published", type: "date",   sort: 4),
+            PropSeed(db: "books", key: "page_count",     label: "Pages",     type: "number", sort: 5),
+            PropSeed(db: "books", key: "status",         label: "Status",    type: "select", sort: 6),
+            PropSeed(db: "books", key: "rating",         label: "Rating",    type: "number", sort: 7),
+            PropSeed(db: "books", key: "started_date",   label: "Started",   type: "date",   sort: 8),
+            PropSeed(db: "books", key: "finished_date",  label: "Finished",  type: "date",   sort: 9),
+            PropSeed(db: "books", key: "notes",          label: "Notes",     type: "text",   sort: 10),
+            // movies
+            PropSeed(db: "movies", key: "name",            label: "Title",         type: "title",  sort: 0),
+            PropSeed(db: "movies", key: "year",            label: "Year",          type: "number", sort: 1),
+            PropSeed(db: "movies", key: "tmdb_id",         label: "TMDB ID",       type: "text",   sort: 2),
+            PropSeed(db: "movies", key: "release_date",    label: "Released",      type: "date",   sort: 3),
+            PropSeed(db: "movies", key: "runtime_minutes", label: "Runtime (min)", type: "number", sort: 4),
+            PropSeed(db: "movies", key: "overview",        label: "Overview",      type: "text",   sort: 5),
+            PropSeed(db: "movies", key: "status",          label: "Status",        type: "select", sort: 6),
+            PropSeed(db: "movies", key: "rating",          label: "Rating",        type: "number", sort: 7),
+            PropSeed(db: "movies", key: "watched_date",    label: "Watched",       type: "date",   sort: 8),
+            PropSeed(db: "movies", key: "notes",           label: "Notes",         type: "text",   sort: 9),
+            // tv_shows
+            PropSeed(db: "tv_shows", key: "name",           label: "Title",        type: "title",  sort: 0),
+            PropSeed(db: "tv_shows", key: "year",           label: "Year",         type: "number", sort: 1),
+            PropSeed(db: "tv_shows", key: "tmdb_id",        label: "TMDB ID",      type: "text",   sort: 2),
+            PropSeed(db: "tv_shows", key: "first_air_date", label: "First aired",  type: "date",   sort: 3),
+            PropSeed(db: "tv_shows", key: "season_count",   label: "Seasons",      type: "number", sort: 4),
+            PropSeed(db: "tv_shows", key: "episode_count",  label: "Episodes",     type: "number", sort: 5),
+            PropSeed(db: "tv_shows", key: "overview",       label: "Overview",     type: "text",   sort: 6),
+            PropSeed(db: "tv_shows", key: "status",         label: "Status",       type: "select", sort: 7),
+            PropSeed(db: "tv_shows", key: "rating",         label: "Rating",       type: "number", sort: 8),
+            PropSeed(db: "tv_shows", key: "last_watched",   label: "Last watched", type: "date",   sort: 9),
+            PropSeed(db: "tv_shows", key: "notes",          label: "Notes",        type: "text",   sort: 10),
+            // restaurants
+            PropSeed(db: "restaurants", key: "name",         label: "Name",         type: "title",    sort: 0),
+            PropSeed(db: "restaurants", key: "vendor",       label: "Vendor",       type: "relation", sort: 1),
+            PropSeed(db: "restaurants", key: "cuisine",      label: "Cuisine",      type: "select",   sort: 2),
+            PropSeed(db: "restaurants", key: "price_range",  label: "Price",        type: "select",   sort: 3),
+            PropSeed(db: "restaurants", key: "rating",       label: "Rating",       type: "number",   sort: 4),
+            PropSeed(db: "restaurants", key: "status",       label: "Status",       type: "select",   sort: 5),
+            PropSeed(db: "restaurants", key: "last_visited", label: "Last visited", type: "date",     sort: 6),
+            PropSeed(db: "restaurants", key: "notes",        label: "Notes",        type: "text",     sort: 7),
         ]
         for p in props {
             let propID = "\(p.db).\(p.key)"
             let configJSON: String = {
-                guard p.type == "relation" else { return "{}" }
                 switch (p.db, p.key) {
+                // Relation properties — point at the target database.
                 case ("pets", "vet"):           return #"{"targetDatabaseID":"people"}"#
                 case ("documents", "related"):  return #"{"targetDatabaseID":"people"}"#
                 case ("events", "with"):        return #"{"targetDatabaseID":"people"}"#
@@ -169,6 +218,15 @@ enum Seed {
                 case ("lodging",        "organization"): return #"{"targetDatabaseID":"vendors"}"#
                 case ("transportation", "trip"):         return #"{"targetDatabaseID":"trips"}"#
                 case ("transportation", "organization"): return #"{"targetDatabaseID":"vendors"}"#
+                case ("restaurants",    "vendor"):       return #"{"targetDatabaseID":"vendors"}"#
+                // Select properties with a fixed option list. Cycle-on-tap
+                // depends on this; without options the editor falls back
+                // to free-form text.
+                case ("books",       "status"):      return #"{"options":["to_read","reading","read","abandoned"]}"#
+                case ("movies",      "status"):      return #"{"options":["to_watch","watched","dropped"]}"#
+                case ("tv_shows",    "status"):      return #"{"options":["to_watch","watching","watched","dropped"]}"#
+                case ("restaurants", "status"):      return #"{"options":["want_to_try","visited"]}"#
+                case ("restaurants", "price_range"): return #"{"options":["$","$$","$$$","$$$$"]}"#
                 default:                        return "{}"
                 }
             }()

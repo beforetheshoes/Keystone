@@ -28,14 +28,7 @@ struct PropertyValueField: View {
         case .json:
             JSONField(value: $value, onCommit: onCommit)
         case .select:
-            // Free-form for now; once per-property options are stored in
-            // properties.config_json this will become a Menu picker.
-            TextField("—", text: $value)
-                .textFieldStyle(.plain)
-                .font(.kstText(size: 13))
-                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
-                .onSubmit(onCommit)
-                .onChange(of: value) { _, _ in onCommit() }
+            SelectField(property: property, value: $value, onCommit: onCommit)
         default:
             TextField("—", text: $value)
                 .textFieldStyle(.plain)
@@ -428,6 +421,84 @@ private struct DateTimeZoneField: View {
         let parsed = DateTZValue(date: date, timezone: timezone, isAllDay: isAllDay)
         value = DateValueCodec.encodeTZ(parsed)
         onCommit()
+    }
+}
+
+// MARK: - Select
+
+/// Editor for `.select` properties. Two modes, decided by whether the
+/// property's config_json carries an `options` list:
+///
+/// - **With options**: renders a soft pill. Tapping cycles forward
+///   through the list (wraps at the end). Right-click / long-press
+///   opens a Menu listing every option plus a Clear item.
+/// - **Without options**: free-form text field, identical to the
+///   pre-#6 behavior so existing select columns keep working.
+private struct SelectField: View {
+    let property: PropertyRow
+    @Binding var value: String
+    var onCommit: () -> Void
+
+    var body: some View {
+        if let options = property.config.options, !options.isEmpty {
+            optionPill(options: options)
+        } else {
+            TextField("—", text: $value)
+                .textFieldStyle(.plain)
+                .font(.kstText(size: 13))
+                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+                .onSubmit(onCommit)
+                .onChange(of: value) { _, _ in onCommit() }
+        }
+    }
+
+    private func optionPill(options: [String]) -> some View {
+        let labelText = value.isEmpty ? "—" : value
+        return Button {
+            value = SelectCycle.next(current: value, in: options)
+            onCommit()
+        } label: {
+            Text(labelText)
+                .font(.kstText(size: 12, weight: .medium))
+                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+                .padding(.horizontal, 10)
+                .frame(height: 22)
+                .background(value.isEmpty ? KstColor.paper2 : KstColor.paper2.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            ForEach(options, id: \.self) { option in
+                Button(option) {
+                    value = option
+                    onCommit()
+                }
+            }
+            Divider()
+            Button("Clear") {
+                value = ""
+                onCommit()
+            }
+        }
+    }
+}
+
+/// Pure helpers for the option-cycle UX. Extracted so unit tests can
+/// pin the wrap-around + empty-value behavior without spinning up the
+/// view layer.
+enum SelectCycle {
+    /// Advance to the next option. Empty value picks the first;
+    /// last option wraps to the first; an unrecognized current value
+    /// also picks the first (defensive).
+    static func next(current: String, in options: [String]) -> String {
+        guard !options.isEmpty else { return current }
+        guard let idx = options.firstIndex(of: current) else { return options[0] }
+        let nextIdx = (idx + 1) % options.count
+        return options[nextIdx]
     }
 }
 

@@ -62,13 +62,17 @@ struct PropertyConfig: Equatable, Sendable {
     /// Currency code for `.currency` formatting. Defaults to "USD"
     /// when format is `.currency` but no code is set.
     var currencyCode: String?
+    /// For `.select` properties: the allowed values, in display order.
+    /// When non-nil, the editor renders a pill that cycles through the
+    /// list on tap; when nil, the property accepts free-form text.
+    var options: [String]?
     /// Verbatim JSON-encoded blob of other keys we don't model directly
     /// here (e.g. `targetDatabaseID` for relations). Stored as a string
     /// so the struct stays `Sendable` — writes round-trip via `encoded()`
     /// without stripping these keys.
     var rawExtrasJSON: String
 
-    static let empty = PropertyConfig(alignment: nil, format: nil, currencyCode: nil, rawExtrasJSON: "{}")
+    static let empty = PropertyConfig(alignment: nil, format: nil, currencyCode: nil, options: nil, rawExtrasJSON: "{}")
 
     static func parse(_ json: String) -> PropertyConfig {
         guard let data = json.data(using: .utf8),
@@ -79,15 +83,23 @@ struct PropertyConfig: Equatable, Sendable {
         let alignment = (obj["alignment"] as? String).flatMap(PropertyAlignment.init(rawValue:))
         let format = (obj["format"] as? String).flatMap(PropertyFormat.init(rawValue:))
         let code = obj["currencyCode"] as? String
+        // Reject non-string elements so a corrupted config can't crash
+        // the cycle helper; treat as no-options instead.
+        let options: [String]? = {
+            guard let raw = obj["options"] as? [Any] else { return nil }
+            let strings = raw.compactMap { $0 as? String }
+            return strings.count == raw.count ? strings : nil
+        }()
         extras.removeValue(forKey: "alignment")
         extras.removeValue(forKey: "format")
         extras.removeValue(forKey: "currencyCode")
+        extras.removeValue(forKey: "options")
         let extrasJSON: String = {
             guard let data = try? JSONSerialization.data(withJSONObject: extras),
                   let str = String(data: data, encoding: .utf8) else { return "{}" }
             return str
         }()
-        return PropertyConfig(alignment: alignment, format: format, currencyCode: code, rawExtrasJSON: extrasJSON)
+        return PropertyConfig(alignment: alignment, format: format, currencyCode: code, options: options, rawExtrasJSON: extrasJSON)
     }
 
     /// Re-encode the config back to a JSON string, preserving any
@@ -102,6 +114,7 @@ struct PropertyConfig: Equatable, Sendable {
         if let alignment { obj["alignment"] = alignment.rawValue }
         if let format { obj["format"] = format.rawValue }
         if let currencyCode { obj["currencyCode"] = currencyCode }
+        if let options { obj["options"] = options }
         guard let data = try? JSONSerialization.data(withJSONObject: obj),
               let str = String(data: data, encoding: .utf8) else {
             return "{}"
