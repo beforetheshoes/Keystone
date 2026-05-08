@@ -372,33 +372,46 @@ private struct PropertiesGrid: View {
         VStack(spacing: 0) {
             let visible = properties.filter { $0.type != .title }
             ForEach(Array(visible.enumerated()), id: \.element.id) { idx, p in
-                HStack(alignment: .center, spacing: 0) {
-                    HStack(spacing: 7) {
-                        PropTypeIcon(type: p.type)
-                        Text(p.name)
-                            .font(.kstText(size: 13))
-                            .foregroundStyle(KstColor.ink2)
-                    }
-                    .frame(width: 130, alignment: .leading)
+                VStack(spacing: 0) {
+                    HStack(alignment: .center, spacing: 0) {
+                        HStack(spacing: 7) {
+                            PropTypeIcon(type: p.type)
+                            Text(p.name)
+                                .font(.kstText(size: 13))
+                                .foregroundStyle(KstColor.ink2)
+                        }
+                        .frame(width: 130, alignment: .leading)
 
-                    if p.type == .relation {
-                        RelationField(store: store, property: p)
-                    } else {
-                        PropertyValueField(
-                            property: p,
-                            value: Binding(
-                                get: { drafts[p.key] ?? record.values[p.key] ?? "" },
-                                set: { newValue in
-                                    drafts[p.key] = newValue
-                                }
-                            ),
-                            onCommit: { onSubmit(p.key) }
-                        )
-                    }
+                        if p.type == .relation {
+                            RelationField(store: store, property: p)
+                        } else {
+                            PropertyValueField(
+                                property: p,
+                                value: Binding(
+                                    get: { drafts[p.key] ?? record.values[p.key] ?? "" },
+                                    set: { newValue in
+                                        drafts[p.key] = newValue
+                                    }
+                                ),
+                                onCommit: { onSubmit(p.key) },
+                                recordID: record.id
+                            )
+                        }
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 9)
+
+                    #if canImport(MapKit)
+                    if p.type == .address {
+                        if #available(iOS 26.0, macOS 26.0, *) {
+                            AddressMapPreviewRow(recordID: record.id, propertyKey: p.key)
+                                .padding(.bottom, 9)
+                                .padding(.leading, 130)  // align under the value column
+                        }
+                    }
+                    #endif
                 }
-                .padding(.vertical, 9)
                 .overlay(alignment: .bottom) {
                     if idx < visible.count - 1 {
                         Rectangle().fill(KstColor.paper3).frame(height: 0.5)
@@ -490,3 +503,37 @@ private struct RelatedGroupCard: View {
     }
 }
 
+
+#if canImport(MapKit)
+/// Hydrates the structured address JSON for an address property and
+/// renders an `AddressMapPreview` underneath the field row when the
+/// stored value carries lat/lon or a place_id. Re-fetches when the
+/// record / property changes.
+@available(iOS 26.0, macOS 26.0, *)
+private struct AddressMapPreviewRow: View {
+    let recordID: String
+    let propertyKey: String
+
+    @Dependency(\.databaseClient) private var databaseClient
+    @State private var address: AddressValue?
+
+    var body: some View {
+        Group {
+            if let address {
+                AddressMapPreview(address: address)
+            } else {
+                EmptyView()
+            }
+        }
+        .task(id: "\(recordID).\(propertyKey)") {
+            await reload()
+        }
+    }
+
+    private func reload() async {
+        let json = try? databaseClient.propertyJSON(recordID, propertyKey)
+        let parsed = json.flatMap(AddressValueCodec.parse(_:))
+        await MainActor.run { address = parsed }
+    }
+}
+#endif

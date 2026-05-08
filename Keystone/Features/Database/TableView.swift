@@ -21,7 +21,7 @@ struct TableView: View {
 
     private static let columnWidths: [PropertyType: CGFloat] = [
         .title: 220, .select: 130, .date: 130, .dateTZ: 200, .text: 200, .number: 100,
-        .currency: 110, .phone: 140, .email: 160, .relation: 160,
+        .currency: 110, .phone: 140, .email: 160, .relation: 160, .address: 220,
     ]
 
     private func width(for prop: PropertyRow) -> CGFloat {
@@ -330,6 +330,7 @@ struct PropTypeIcon: View {
         case .select: "circle.dashed"
         case .date:   "calendar"
         case .dateTZ: "calendar.badge.clock"
+        case .address: "mappin.and.ellipse"
         case .number: "number"
         case .text:   "text.alignleft"
         case .phone:  "phone"

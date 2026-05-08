@@ -265,6 +265,15 @@ enum DBReads {
                 }
                 continue
             }
+            if propType == "address" {
+                // Cell renderers / search / filters only need the
+                // denormalized one-line; the editor pulls json_value
+                // separately via DatabaseClient.propertyJSON.
+                if let t: String = row["text_value"], !t.isEmpty {
+                    byRecord[rid, default: [:]][key] = t
+                }
+                continue
+            }
             if let t: String = row["text_value"] {
                 byRecord[rid, default: [:]][key] = t
             } else if let n: Double = row["number_value"] {
@@ -329,6 +338,29 @@ enum DBReads {
         }
     }
 
+    /// Fetch the raw `json_value` for a (record, property-key) pair.
+    /// Returns nil when no row exists, the property doesn't exist on the
+    /// record's database, or json_value is empty. Used by the address
+    /// editor to hydrate structured state on demand.
+    static func propertyJSON(_ db: Database, recordID: String, propertyKey: String) throws -> String? {
+        let raw: String? = try String.fetchOne(
+            db,
+            sql: """
+                SELECT pv.json_value
+                FROM property_values pv
+                JOIN properties p ON p.id = pv.property_id
+                JOIN records r ON r.id = pv.record_id
+                WHERE pv.record_id = ?
+                  AND p.key = ?
+                  AND p.database_id = r.database_id
+                LIMIT 1
+            """,
+            arguments: [recordID, propertyKey]
+        )
+        guard let raw, !raw.isEmpty else { return nil }
+        return raw
+    }
+
     static func record(_ db: Database, id: String) throws -> RecordRow? {
         guard let row = try Row.fetchOne(db, sql: """
             SELECT r.id, r.database_id, r.title, r.glyph, r.tone, r.sort_index,
@@ -358,6 +390,12 @@ enum DBReads {
                     values[key] = date
                 } else if !tz.isEmpty {
                     values[key] = tz
+                }
+                continue
+            }
+            if propType == "address" {
+                if let t: String = vrow["text_value"], !t.isEmpty {
+                    values[key] = t
                 }
                 continue
             }

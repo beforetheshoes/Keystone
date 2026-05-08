@@ -9,6 +9,7 @@ Properties are the typed fields on a record. Each database defines its own set; 
 - `number` — integer or decimal. Rendered with monospaced digits.
 - `date` — a whole-day date with no time and no time zone. Used for things like birthdays and one-day events.
 - `date_tz` — an instant in time *plus* a time zone. The detail row shows two lines: the event's local time on top, your local time underneath when they differ. Toggle **All day** in the picker to store a whole-day event in a specific zone. Used by Activities, Lodging, and the Calendar view.
+- `address` — a structured location. Type a street and Keystone shows Apple Maps autocomplete suggestions; picking one fills lat/lon, postal code, region, and a stable Apple Place ID, and renders an inline map preview on the detail row. Typing without picking falls back to a plain-text address (no map). Used by Vendors and Homes.
 - `select` — a single-choice value, rendered as a soft pill.
 - `phone` — text formatted with monospaced digits.
 - `email` — text.

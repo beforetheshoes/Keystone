@@ -1019,6 +1019,27 @@ enum Schema {
         }
     }
 
+    /// v25: flip the two text-typed `address` properties (`vendors.address`
+    /// and `homes.address`) to the new `address` PropertyType. Addresses
+    /// in other databases (activities, lodging, transportation,
+    /// restaurants) flow via the `vendor`/`organization` relation rather
+    /// than a top-level address column, so they're not flipped.
+    ///
+    /// Idempotent — `WHERE … type = 'text'` makes the UPDATE a no-op
+    /// once flipped. Existing values in `property_values` are left
+    /// untouched: `text_value` keeps the user's typed one-line and
+    /// `json_value` stays null until the user re-edits with autocomplete.
+    static func flipAddressPropertiesV25(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let propIDs = ["vendors.address", "homes.address"]
+        for id in propIDs {
+            try db.execute(
+                sql: "UPDATE properties SET type = 'address', updated_at = ? WHERE id = ? AND type = 'text'",
+                arguments: [now, id]
+            )
+        }
+    }
+
     /// v23: flip the four time-of-day Travel properties from plain `date`
     /// to time-zone-aware `date_tz`. Activities and lodging now carry
     /// instants in the event's local time zone (with the IANA tz id

@@ -8,6 +8,11 @@ struct PropertyValueField: View {
     var property: PropertyRow
     @Binding var value: String
     var onCommit: () -> Void
+    /// The record being edited, when known. The address editor uses
+    /// it to hydrate structured state via `DatabaseClient.propertyJSON`;
+    /// other field kinds ignore it. Default-nil keeps existing call
+    /// sites compiling unchanged.
+    var recordID: String? = nil
 
     var body: some View {
         switch property.type {
@@ -15,6 +20,13 @@ struct PropertyValueField: View {
             DateField(value: $value, onCommit: onCommit)
         case .dateTZ:
             DateTimeZoneField(value: $value, onCommit: onCommit)
+        case .address:
+            AddressAutocompleteField(
+                value: $value,
+                recordID: recordID,
+                propertyKey: property.key,
+                onCommit: onCommit
+            )
         case .phone:
             PhoneField(value: $value, onCommit: onCommit)
         case .email:

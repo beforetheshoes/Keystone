@@ -81,7 +81,7 @@ enum Seed {
             PropSeed(db: "pets", key: "vet",      label: "Vet",      type: "relation", sort: 4),
             // homes
             PropSeed(db: "homes", key: "name",      label: "Name",      type: "title",  sort: 0),
-            PropSeed(db: "homes", key: "address",   label: "Address",   type: "text",   sort: 1),
+            PropSeed(db: "homes", key: "address",   label: "Address",   type: "address", sort: 1),
             PropSeed(db: "homes", key: "sqft",      label: "Sq Ft",     type: "number", sort: 2),
             PropSeed(db: "homes", key: "purchased", label: "Purchased", type: "date",   sort: 3),
             // vehicles
@@ -106,7 +106,7 @@ enum Seed {
             PropSeed(db: "vendors", key: "phone",    label: "Phone",           type: "phone",  sort: 2),
             PropSeed(db: "vendors", key: "email",    label: "Email",           type: "email",  sort: 3),
             PropSeed(db: "vendors", key: "website",  label: "Website",         type: "url",    sort: 4),
-            PropSeed(db: "vendors", key: "address",  label: "Address",         type: "text",   sort: 5),
+            PropSeed(db: "vendors", key: "address",  label: "Address",         type: "address",sort: 5),
             PropSeed(db: "vendors", key: "locality", label: "City",            type: "text",   sort: 5.5),
             PropSeed(db: "vendors", key: "notes",    label: "Notes",           type: "text",   sort: 6),
             PropSeed(db: "vendors", key: "place_id", label: "Apple Place ID",  type: "text",   sort: 7),

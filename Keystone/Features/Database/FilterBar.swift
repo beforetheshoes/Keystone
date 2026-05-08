@@ -77,7 +77,7 @@ struct FilterBar: View {
     private var filterableProperties: [PropertyRow] {
         properties.filter { p in
             switch p.type {
-            case .title, .text, .relation, .date, .dateRange, .dateTZ,
+            case .title, .text, .relation, .date, .dateRange, .dateTZ, .address,
                  .select, .multiSelect, .status, .number, .currency,
                  .checkbox:
                 return true

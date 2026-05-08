@@ -230,6 +230,20 @@ enum DBWrites {
                 // text_value so a later edit can recover it.
                 textValue = trimmed
             }
+        case "address":
+            // Two storage modes:
+            //   • Structured (autocomplete pick) → JSON in `value` parses
+            //     via AddressValueCodec; we store the one-line display
+            //     in text_value AND the JSON in json_value.
+            //   • Free-form text → keep just the one-line in text_value.
+            // Reads.swift always emits text_value into the values map,
+            // so cell renderers see the same one-line in either mode.
+            if let parsed = AddressValueCodec.parse(trimmed) {
+                textValue = parsed.display.isEmpty ? trimmed : parsed.display
+                jsonValue = trimmed
+            } else if !trimmed.isEmpty {
+                textValue = trimmed
+            }
         case "json":
             // Round-trip valid JSON through json_value; on parse failure
             // keep the raw string in text_value so partially-typed input

@@ -32,6 +32,7 @@ public enum PropertyType: String, Codable, Sendable, CaseIterable, Hashable {
     case rollup
     case json
     case dateTZ = "date_tz"
+    case address
 }
 
 public enum ViewKind: String, Codable, Sendable, CaseIterable, Hashable {

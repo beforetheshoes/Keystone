@@ -11,6 +11,10 @@ struct DatabaseClient: Sendable {
     var properties: @Sendable (_ databaseID: String) throws -> [PropertyRow]
     var records: @Sendable (_ databaseID: String) throws -> [RecordRow]
     var record: @Sendable (_ id: String) throws -> RecordRow?
+    /// Raw `json_value` for a (record, property) pair. Returns nil when
+    /// the row is absent or json_value is empty. Used by the address
+    /// editor to hydrate structured state without bloating RecordRow.
+    var propertyJSON: @Sendable (_ recordID: String, _ propertyKey: String) throws -> String?
     var relatedRecords: @Sendable (_ sourceID: String) throws -> [RecordRow]
     var paletteItems: @Sendable () throws -> [PaletteItem]
 
@@ -78,6 +82,7 @@ extension DatabaseClient: DependencyKey {
         properties:      { dbID in try dbRead { try DBReads.properties($0, databaseID: dbID) } },
         records:         { dbID in try dbRead { try DBReads.records($0, databaseID: dbID) } },
         record:          { id in try dbRead { try DBReads.record($0, id: id) } },
+        propertyJSON:    { recID, key in try dbRead { try DBReads.propertyJSON($0, recordID: recID, propertyKey: key) } },
         relatedRecords:  { id in try dbRead { try DBReads.relatedRecords($0, sourceID: id) } },
         paletteItems:    { try dbRead { try DBReads.paletteItems($0) } },
         createRecord:    { dbID, title in try dbWrite { try DBWrites.createRecord($0, databaseID: dbID, title: title) } },
