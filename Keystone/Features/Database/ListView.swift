@@ -59,9 +59,13 @@ private struct ListRow: View {
             .joined(separator: " · ")
     }
     private var dateValue: String? {
-        if let prop = properties.first(where: { $0.type == .date }) {
-            let v = record.values[prop.key] ?? ""
-            return v.isEmpty ? nil : v
+        if let prop = properties.first(where: { $0.type == .date || $0.type == .dateTZ }) {
+            let raw = record.values[prop.key] ?? ""
+            guard !raw.isEmpty else { return nil }
+            if prop.type == .dateTZ, let parsed = DateValueCodec.parseTZ(raw) {
+                return DateValueCodec.compactEventLocal(parsed)
+            }
+            return raw
         }
         return nil
     }

@@ -866,16 +866,16 @@ enum Schema {
             .init(db: "activities", key: "name",         label: "Title",  type: "title",    sort: 0, cfg: "{}"),
             .init(db: "activities", key: "trip",         label: "Trip",   type: "relation", sort: 1, cfg: tripsRel),
             .init(db: "activities", key: "organization", label: "Vendor", type: "relation", sort: 2, cfg: vendorsRel),
-            .init(db: "activities", key: "start",        label: "Start",  type: "date",     sort: 3, cfg: "{}"),
-            .init(db: "activities", key: "end",          label: "End",    type: "date",     sort: 4, cfg: "{}"),
+            .init(db: "activities", key: "start",        label: "Start",  type: "date_tz",  sort: 3, cfg: "{}"),
+            .init(db: "activities", key: "end",          label: "End",    type: "date_tz",  sort: 4, cfg: "{}"),
             .init(db: "activities", key: "cost",         label: "Cost",   type: "currency", sort: 5, cfg: "{}"),
             .init(db: "activities", key: "notes",        label: "Notes",  type: "text",     sort: 6, cfg: "{}"),
             // lodging
             .init(db: "lodging", key: "name",                label: "Name",         type: "title",    sort: 0, cfg: "{}"),
             .init(db: "lodging", key: "trip",                label: "Trip",         type: "relation", sort: 1, cfg: tripsRel),
             .init(db: "lodging", key: "organization",        label: "Vendor",       type: "relation", sort: 2, cfg: vendorsRel),
-            .init(db: "lodging", key: "check_in",            label: "Check-in",     type: "date",     sort: 3, cfg: "{}"),
-            .init(db: "lodging", key: "check_out",           label: "Check-out",    type: "date",     sort: 4, cfg: "{}"),
+            .init(db: "lodging", key: "check_in",            label: "Check-in",     type: "date_tz",  sort: 3, cfg: "{}"),
+            .init(db: "lodging", key: "check_out",           label: "Check-out",    type: "date_tz",  sort: 4, cfg: "{}"),
             .init(db: "lodging", key: "confirmation_number", label: "Confirmation", type: "text",     sort: 5, cfg: "{}"),
             .init(db: "lodging", key: "cost",                label: "Cost",         type: "currency", sort: 6, cfg: "{}"),
             .init(db: "lodging", key: "notes",               label: "Notes",        type: "text",     sort: 7, cfg: "{}"),
@@ -899,6 +899,33 @@ enum Schema {
                     "\(p.db).\(p.key)", p.db,
                     p.key, p.label, p.type, p.cfg, now, now, p.sort
                 ]
+            )
+        }
+    }
+
+    /// v23: flip the four time-of-day Travel properties from plain `date`
+    /// to time-zone-aware `date_tz`. Activities and lodging now carry
+    /// instants in the event's local time zone (with the IANA tz id
+    /// stored alongside) instead of whole-day markers. Trip windows
+    /// (`trips.start_date` / `trips.end_date`) stay as plain `date`
+    /// because they're whole-day markers, not specific instants.
+    ///
+    /// Idempotent — `WHERE … type = 'date'` makes the UPDATE a no-op
+    /// once the type has already been flipped. Existing values in
+    /// `property_values` are left untouched; the renderer falls back
+    /// to a partial display until the user re-edits.
+    static func flipTravelDatePropertiesV23(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let propIDs = [
+            "activities.start",
+            "activities.end",
+            "lodging.check_in",
+            "lodging.check_out",
+        ]
+        for id in propIDs {
+            try db.execute(
+                sql: "UPDATE properties SET type = 'date_tz', updated_at = ? WHERE id = ? AND type = 'date'",
+                arguments: [now, id]
             )
         }
     }

@@ -229,7 +229,7 @@ enum DBReads {
 
         let placeholders = Array(repeating: "?", count: recIDs.count).joined(separator: ",")
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT pv.record_id, p.key, pv.text_value, pv.number_value, pv.date_value, pv.json_value
+            SELECT pv.record_id, p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id IN (\(placeholders))
@@ -239,6 +239,19 @@ enum DBReads {
         for row in valueRows {
             let rid: String = row["record_id"]
             let key: String = row["key"]
+            let propType: String = row["type"] ?? ""
+            if propType == "date_tz" {
+                let date = row["date_value"] as String? ?? ""
+                let tz = row["text_value"] as String? ?? ""
+                if !date.isEmpty && !tz.isEmpty {
+                    byRecord[rid, default: [:]][key] = "\(date)|\(tz)"
+                } else if !date.isEmpty {
+                    byRecord[rid, default: [:]][key] = date
+                } else if !tz.isEmpty {
+                    byRecord[rid, default: [:]][key] = tz
+                }
+                continue
+            }
             if let t: String = row["text_value"] {
                 byRecord[rid, default: [:]][key] = t
             } else if let n: Double = row["number_value"] {
@@ -313,7 +326,7 @@ enum DBReads {
         """, arguments: [id]) else { return nil }
 
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT p.key, pv.text_value, pv.number_value, pv.date_value, pv.json_value
+            SELECT p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id = ?
@@ -322,6 +335,19 @@ enum DBReads {
         var values: [String: String] = [:]
         for vrow in valueRows {
             let key: String = vrow["key"]
+            let propType: String = vrow["type"] ?? ""
+            if propType == "date_tz" {
+                let date = vrow["date_value"] as String? ?? ""
+                let tz = vrow["text_value"] as String? ?? ""
+                if !date.isEmpty && !tz.isEmpty {
+                    values[key] = "\(date)|\(tz)"
+                } else if !date.isEmpty {
+                    values[key] = date
+                } else if !tz.isEmpty {
+                    values[key] = tz
+                }
+                continue
+            }
             if let t: String = vrow["text_value"] {
                 values[key] = t
             } else if let n: Double = vrow["number_value"] {

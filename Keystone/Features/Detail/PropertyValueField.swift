@@ -13,6 +13,8 @@ struct PropertyValueField: View {
         switch property.type {
         case .date:
             DateField(value: $value, onCommit: onCommit)
+        case .dateTZ:
+            DateTimeZoneField(value: $value, onCommit: onCommit)
         case .phone:
             PhoneField(value: $value, onCommit: onCommit)
         case .email:
@@ -113,50 +115,6 @@ private struct DateField: View {
         .onChange(of: value) { _, new in
             if let parsed = DateValueCodec.parse(new) { date = parsed }
         }
-    }
-}
-
-enum DateValueCodec {
-    /// Canonical wire format: ISO short date (yyyy-MM-dd).
-    static func iso(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
-    }
-
-    /// Display format shown in detail rows ("Mar 14, 1989").
-    static func display(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .none
-        return f.string(from: date)
-    }
-
-    /// Permissive parser. Tries ISO first, then several common human formats
-    /// so existing free-form values like "Mar 14, 1989" or "04/14/1988"
-    /// continue to work without manual migration.
-    static func parse(_ raw: String) -> Date? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let formats = [
-            "yyyy-MM-dd",
-            "MMM d, yyyy",
-            "MMMM d, yyyy",
-            "M/d/yyyy",
-            "MM/dd/yyyy",
-            "yyyy/MM/dd",
-            "d MMM yyyy",
-        ]
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        for fmt in formats {
-            f.dateFormat = fmt
-            if let d = f.date(from: trimmed) { return d }
-        }
-        return nil
     }
 }
 
@@ -352,6 +310,124 @@ private struct JSONField: View {
     private var borderColor: Color {
         if value.isEmpty || isValidJSON { return KstColor.ink4 }
         return Color.orange.opacity(0.6)
+    }
+}
+
+// MARK: - Date + Time Zone
+
+/// Editor for `date_tz` properties. Display surface shows the parsed
+/// event-local + viewer-local lines (`DateTimeZoneSection`) and opens a
+/// popover with date / time / tz controls on tap. All-day toggle hides
+/// the time picker and forces midnight-in-event-tz storage.
+private struct DateTimeZoneField: View {
+    @Binding var value: String
+    var onCommit: () -> Void
+
+    @State private var date: Date = Date()
+    @State private var timezone: TimeZone = .autoupdatingCurrent
+    @State private var isAllDay: Bool = false
+    @State private var isPresentingPopover = false
+    @State private var isPresentingTZSheet = false
+
+    var body: some View {
+        Button { isPresentingPopover.toggle() } label: {
+            HStack(alignment: .center, spacing: 6) {
+                if let parsed = DateValueCodec.parseTZ(value) {
+                    DateTimeZoneSection(value: parsed)
+                } else if value.isEmpty {
+                    Text("—")
+                        .font(.kstText(size: 13))
+                        .foregroundStyle(KstColor.ink3)
+                } else {
+                    Text(value)
+                        .font(.kstText(size: 13))
+                        .foregroundStyle(KstColor.ink2)
+                        .italic()
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 11))
+                    .foregroundStyle(KstColor.ink3)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresentingPopover, arrowEdge: .bottom) {
+            popoverContent
+                .padding(14)
+                .frame(minWidth: 320)
+        }
+        .onAppear { hydrate() }
+        .onChange(of: value) { _, _ in hydrate() }
+    }
+
+    @ViewBuilder
+    private var popoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DatePicker("Date", selection: $date, displayedComponents: [.date])
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+
+            Toggle("All day", isOn: $isAllDay)
+                .toggleStyle(.switch)
+                .font(.kstText(size: 13))
+
+            if !isAllDay {
+                DatePicker("Time", selection: $date, displayedComponents: [.hourAndMinute])
+                    .datePickerStyle(.compact)
+                    .labelsHidden()
+            }
+
+            Button {
+                isPresentingTZSheet = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 11))
+                    Text(timezone.identifier)
+                        .font(.kstText(size: 13))
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(KstColor.ink3)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+
+            HStack {
+                Button("Clear") {
+                    value = ""
+                    onCommit()
+                    isPresentingPopover = false
+                }
+                Spacer()
+                Button("Done") {
+                    commit()
+                    isPresentingPopover = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .sheet(isPresented: $isPresentingTZSheet) {
+            TimeZonePickerSheet(current: timezone.identifier) { picked in
+                if let tz = TimeZone(identifier: picked) { timezone = tz }
+            }
+        }
+    }
+
+    private func hydrate() {
+        if let parsed = DateValueCodec.parseTZ(value) {
+            date = parsed.date
+            timezone = parsed.timezone
+            isAllDay = parsed.isAllDay
+        }
+    }
+
+    private func commit() {
+        let parsed = DateTZValue(date: date, timezone: timezone, isAllDay: isAllDay)
+        value = DateValueCodec.encodeTZ(parsed)
+        onCommit()
     }
 }
 

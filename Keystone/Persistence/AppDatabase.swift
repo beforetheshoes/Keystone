@@ -295,6 +295,9 @@ enum AppDatabase {
         migrator.registerMigration("v22-travel-area") { db in
             try Schema.seedTravelAreaV22(db)
         }
+        migrator.registerMigration("v23-flip-travel-date-tz") { db in
+            try Schema.flipTravelDatePropertiesV23(db)
+        }
         migrator.registerMigration("v16-relocate-assets") { db in
             try Schema.relocateAssetsV16(db)
         }

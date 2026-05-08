@@ -33,4 +33,30 @@ enum KeystoneSettings {
         let full = resolvedDisplayName()
         return full.split(separator: " ").first.map(String.init) ?? full
     }
+
+    // MARK: - Recent time zones
+
+    static let recentTimeZonesKey = "kst.recentTimeZones"
+    static let recentTimeZonesLimit = 8
+
+    /// Most-recently-used IANA time-zone identifiers, newest first. Capped
+    /// at `recentTimeZonesLimit`. Used by `TimeZonePickerSheet` to pin
+    /// frequent picks above the alphabetized list.
+    static var recentTimeZones: [String] {
+        let raw = UserDefaults.standard.array(forKey: recentTimeZonesKey) as? [String]
+        return raw ?? []
+    }
+
+    /// Push `identifier` to the front of the recents list; drop dupes; cap
+    /// to `recentTimeZonesLimit`. No-op when `identifier` isn't a known
+    /// time zone (defensive — shouldn't happen, but a typo'd id never
+    /// makes it into the persisted list).
+    static func bumpRecentTimeZone(_ identifier: String) {
+        guard TimeZone(identifier: identifier) != nil else { return }
+        var list = recentTimeZones
+        list.removeAll { $0 == identifier }
+        list.insert(identifier, at: 0)
+        if list.count > recentTimeZonesLimit { list.removeLast(list.count - recentTimeZonesLimit) }
+        UserDefaults.standard.set(list, forKey: recentTimeZonesKey)
+    }
 }

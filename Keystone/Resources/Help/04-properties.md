@@ -7,7 +7,8 @@ Properties are the typed fields on a record. Each database defines its own set; 
 - `title` — the record's name. Always shown in the hero block.
 - `text` — free-form short text.
 - `number` — integer or decimal. Rendered with monospaced digits.
-- `date` — text-formatted date string. (Date pickers are coming; for now type the string.)
+- `date` — a whole-day date with no time and no time zone. Used for things like birthdays and one-day events.
+- `date_tz` — an instant in time *plus* a time zone. The detail row shows two lines: the event's local time on top, your local time underneath when they differ. Toggle **All day** in the picker to store a whole-day event in a specific zone. Used by Activities, Lodging, and the Calendar view.
 - `select` — a single-choice value, rendered as a soft pill.
 - `phone` — text formatted with monospaced digits.
 - `email` — text.

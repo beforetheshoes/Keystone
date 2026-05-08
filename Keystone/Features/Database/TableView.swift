@@ -20,7 +20,7 @@ struct TableView: View {
     private let rowH: CGFloat = 34
 
     private static let columnWidths: [PropertyType: CGFloat] = [
-        .title: 220, .select: 130, .date: 130, .text: 200, .number: 100,
+        .title: 220, .select: 130, .date: 130, .dateTZ: 200, .text: 200, .number: 100,
         .currency: 110, .phone: 140, .email: 160, .relation: 160,
     ]
 
@@ -269,6 +269,9 @@ private struct TableCell: View {
         if prop.type == .date, let parsed = DateValueCodec.parse(value) {
             return DateValueCodec.display(parsed)
         }
+        if prop.type == .dateTZ, let parsed = DateValueCodec.parseTZ(value) {
+            return DateValueCodec.compactEventLocal(parsed)
+        }
         if shouldFormatAsCurrency, let number = Double(value) {
             let code = prop.config.currencyCode ?? "USD"
             return Self.currencyFormatter(code: code).string(from: NSNumber(value: number)) ?? value
@@ -326,6 +329,7 @@ struct PropTypeIcon: View {
         case .title:  "textformat"
         case .select: "circle.dashed"
         case .date:   "calendar"
+        case .dateTZ: "calendar.badge.clock"
         case .number: "number"
         case .text:   "text.alignleft"
         case .phone:  "phone"

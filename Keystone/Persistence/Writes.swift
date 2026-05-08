@@ -221,6 +221,15 @@ enum DBWrites {
         case "date":
             dateValue = trimmed.isEmpty ? nil : trimmed
             textValue = dateValue
+        case "date_tz":
+            if let split = DateValueCodec.parseTZRaw(trimmed) {
+                textValue = split.tz
+                dateValue = split.dateString
+            } else if !trimmed.isEmpty {
+                // Legacy / partial fallback: stash the raw input in
+                // text_value so a later edit can recover it.
+                textValue = trimmed
+            }
         case "json":
             // Round-trip valid JSON through json_value; on parse failure
             // keep the raw string in text_value so partially-typed input

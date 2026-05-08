@@ -70,11 +70,21 @@ enum FilterEngine {
             return !targetIDs.isDisjoint(with: ids)
 
         case .dateRange(let from, let to):
-            guard let raw = filter.propertyKey == "title" ? nil : record.values[filter.propertyKey],
-                  let parsed = DateValueCodec.parse(raw)
-            else { return false }
-            if let from, parsed < startOfDay(from) { return false }
-            if let to, parsed > endOfDay(to) { return false }
+            guard let raw = filter.propertyKey == "title" ? nil : record.values[filter.propertyKey] else { return false }
+            // date_tz values come through as `<date>|<tz>`; prefer the
+            // tz-aware parse so the instant comparison is correct.
+            // Fall back to the plain-date parse for legacy / partial
+            // values and for ordinary `date` properties.
+            let instant: Date
+            if let parsedTZ = DateValueCodec.parseTZ(raw) {
+                instant = parsedTZ.date
+            } else if let parsed = DateValueCodec.parse(raw) {
+                instant = parsed
+            } else {
+                return false
+            }
+            if let from, instant < startOfDay(from) { return false }
+            if let to, instant > endOfDay(to) { return false }
             return true
 
         case .selectIsAnyOf(let values):
@@ -116,7 +126,7 @@ enum FilterPredicateFactory {
     static func empty(for type: PropertyType) -> FilterPredicate {
         switch type {
         case .relation:                      return .relationIsAnyOf([])
-        case .date, .dateRange:              return .dateRange(from: nil, to: nil)
+        case .date, .dateRange, .dateTZ:     return .dateRange(from: nil, to: nil)
         case .select, .multiSelect, .status: return .selectIsAnyOf([])
         case .number, .currency:             return .numberRange(min: nil, max: nil)
         case .checkbox:                      return .checkbox(nil)

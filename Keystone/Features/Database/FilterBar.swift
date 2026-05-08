@@ -77,7 +77,7 @@ struct FilterBar: View {
     private var filterableProperties: [PropertyRow] {
         properties.filter { p in
             switch p.type {
-            case .title, .text, .relation, .date, .dateRange,
+            case .title, .text, .relation, .date, .dateRange, .dateTZ,
                  .select, .multiSelect, .status, .number, .currency,
                  .checkbox:
                 return true
@@ -90,7 +90,7 @@ struct FilterBar: View {
     private func filterIconName(for type: PropertyType) -> String {
         switch type {
         case .relation:                          return "link"
-        case .date, .dateRange:                  return "calendar"
+        case .date, .dateRange, .dateTZ:         return "calendar"
         case .select, .multiSelect, .status:     return "circle.dashed"
         case .number, .currency:                 return "number"
         case .checkbox:                          return "checkmark.square"
@@ -205,7 +205,7 @@ private struct FilterChip: View {
     private var chipIcon: String {
         switch property.type {
         case .relation:                       return "link"
-        case .date, .dateRange:               return "calendar"
+        case .date, .dateRange, .dateTZ:      return "calendar"
         case .select, .multiSelect, .status:  return "circle.dashed"
         case .number, .currency:              return "number"
         case .checkbox:                       return "checkmark.square"
