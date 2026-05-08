@@ -22,6 +22,7 @@ enum Seed {
             ("area-mobility", "Mobility", "iris",     2),
             ("area-records",  "Records",  "cerulean", 3),
             ("area-plans",    "Plans",    "amber",    4),
+            ("area-travel",   "Travel",   "cerulean", 5),
         ]
         for a in areas {
             try db.execute(
@@ -42,6 +43,10 @@ enum Seed {
             DBSeed(key: "vendors",     name: "Vendors",        plural: "Vendors",       icon: "Vn", accent: "graphite", area: "area-records",  defaultView: "table",     sort: 4.7),
             DBSeed(key: "documents",   name: "Documents",      plural: "Documents",     icon: "D",  accent: "cerulean", area: "area-records",  defaultView: "table",     sort: 5),
             DBSeed(key: "events",      name: "Events & Trips", plural: "Events & Trips",icon: "E",  accent: "amber",    area: "area-plans",    defaultView: "table",     sort: 6),
+            DBSeed(key: "trips",          name: "Trips",          plural: "Trips",          icon: "T",  accent: "cerulean", area: "area-travel", defaultView: "list",  sort: 7.0),
+            DBSeed(key: "activities",     name: "Activities",     plural: "Activities",     icon: "Ac", accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.1),
+            DBSeed(key: "lodging",        name: "Lodging",        plural: "Lodging",        icon: "L",  accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.2),
+            DBSeed(key: "transportation", name: "Transportation", plural: "Transportation", icon: "Tr", accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.3),
         ]
         for d in dbs {
             try db.execute(
@@ -115,6 +120,37 @@ enum Seed {
             PropSeed(db: "maintenance", key: "home",    label: "Home",    type: "relation", sort: 1),
             PropSeed(db: "maintenance", key: "due",     label: "Due",     type: "date",     sort: 2),
             PropSeed(db: "maintenance", key: "cadence", label: "Cadence", type: "select",   sort: 3),
+            // trips
+            PropSeed(db: "trips", key: "name",         label: "Name",   type: "title",    sort: 0),
+            PropSeed(db: "trips", key: "notes",        label: "Notes",  type: "text",     sort: 1),
+            PropSeed(db: "trips", key: "start_date",   label: "Start",  type: "date",     sort: 2),
+            PropSeed(db: "trips", key: "end_date",     label: "End",    type: "date",     sort: 3),
+            PropSeed(db: "trips", key: "is_protected", label: "Locked", type: "checkbox", sort: 4),
+            // activities
+            PropSeed(db: "activities", key: "name",         label: "Title",  type: "title",    sort: 0),
+            PropSeed(db: "activities", key: "trip",         label: "Trip",   type: "relation", sort: 1),
+            PropSeed(db: "activities", key: "organization", label: "Vendor", type: "relation", sort: 2),
+            PropSeed(db: "activities", key: "start",        label: "Start",  type: "date",  sort: 3),
+            PropSeed(db: "activities", key: "end",          label: "End",    type: "date",  sort: 4),
+            PropSeed(db: "activities", key: "cost",         label: "Cost",   type: "currency", sort: 5),
+            PropSeed(db: "activities", key: "notes",        label: "Notes",  type: "text",     sort: 6),
+            // lodging
+            PropSeed(db: "lodging", key: "name",                label: "Name",         type: "title",    sort: 0),
+            PropSeed(db: "lodging", key: "trip",                label: "Trip",         type: "relation", sort: 1),
+            PropSeed(db: "lodging", key: "organization",        label: "Vendor",       type: "relation", sort: 2),
+            PropSeed(db: "lodging", key: "check_in",            label: "Check-in",     type: "date",  sort: 3),
+            PropSeed(db: "lodging", key: "check_out",           label: "Check-out",    type: "date",  sort: 4),
+            PropSeed(db: "lodging", key: "confirmation_number", label: "Confirmation", type: "text",     sort: 5),
+            PropSeed(db: "lodging", key: "cost",                label: "Cost",         type: "currency", sort: 6),
+            PropSeed(db: "lodging", key: "notes",               label: "Notes",        type: "text",     sort: 7),
+            // transportation
+            PropSeed(db: "transportation", key: "name",         label: "Name",   type: "title",    sort: 0),
+            PropSeed(db: "transportation", key: "trip",         label: "Trip",   type: "relation", sort: 1),
+            PropSeed(db: "transportation", key: "organization", label: "Vendor", type: "relation", sort: 2),
+            PropSeed(db: "transportation", key: "kind",         label: "Kind",   type: "select",   sort: 3),
+            PropSeed(db: "transportation", key: "legs",         label: "Legs",   type: "json",     sort: 4),
+            PropSeed(db: "transportation", key: "cost",         label: "Cost",   type: "currency", sort: 5),
+            PropSeed(db: "transportation", key: "notes",        label: "Notes",  type: "text",     sort: 6),
         ]
         for p in props {
             let propID = "\(p.db).\(p.key)"
@@ -127,6 +163,12 @@ enum Seed {
                 case ("maintenance", "home"):   return #"{"targetDatabaseID":"homes"}"#
                 case ("vehicle_maintenance", "vehicle"): return #"{"targetDatabaseID":"vehicles"}"#
                 case ("vehicle_maintenance", "vendor"):  return #"{"targetDatabaseID":"vendors"}"#
+                case ("activities",     "trip"):         return #"{"targetDatabaseID":"trips"}"#
+                case ("activities",     "organization"): return #"{"targetDatabaseID":"vendors"}"#
+                case ("lodging",        "trip"):         return #"{"targetDatabaseID":"trips"}"#
+                case ("lodging",        "organization"): return #"{"targetDatabaseID":"vendors"}"#
+                case ("transportation", "trip"):         return #"{"targetDatabaseID":"trips"}"#
+                case ("transportation", "organization"): return #"{"targetDatabaseID":"vendors"}"#
                 default:                        return "{}"
                 }
             }()

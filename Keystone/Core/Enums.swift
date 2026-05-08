@@ -30,6 +30,7 @@ public enum PropertyType: String, Codable, Sendable, CaseIterable, Hashable {
     case location
     case computed
     case rollup
+    case json
 }
 
 public enum ViewKind: String, Codable, Sendable, CaseIterable, Hashable {

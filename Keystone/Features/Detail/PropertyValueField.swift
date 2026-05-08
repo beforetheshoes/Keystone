@@ -23,6 +23,8 @@ struct PropertyValueField: View {
             NumberField(value: $value, onCommit: onCommit)
         case .checkbox:
             CheckboxField(value: $value, onCommit: onCommit)
+        case .json:
+            JSONField(value: $value, onCommit: onCommit)
         case .select:
             // Free-form for now; once per-property options are stored in
             // properties.config_json this will become a Menu picker.
@@ -311,6 +313,48 @@ private struct NumberField: View {
     }
 }
 
+// MARK: - JSON
+
+private struct JSONField: View {
+    @Binding var value: String
+    var onCommit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextEditor(text: $value)
+                .font(.kstMono(size: 12))
+                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+                .frame(minHeight: 64, idealHeight: 96, maxHeight: 240)
+                .scrollContentBackground(.hidden)
+                .background(KstColor.paper1)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(borderColor, lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .onChange(of: value) { _, _ in onCommit() }
+
+            if !value.isEmpty && !isValidJSON {
+                Text("Invalid JSON — value will be kept as text until corrected.")
+                    .font(.kstText(size: 11))
+                    .foregroundStyle(KstColor.ink2)
+            }
+        }
+    }
+
+    private var isValidJSON: Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        guard let data = trimmed.data(using: .utf8) else { return false }
+        return (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil
+    }
+
+    private var borderColor: Color {
+        if value.isEmpty || isValidJSON { return KstColor.ink4 }
+        return Color.orange.opacity(0.6)
+    }
+}
+
 // MARK: - Checkbox
 
 private struct CheckboxField: View {
@@ -335,3 +379,4 @@ private struct CheckboxField: View {
         #endif
     }
 }
+

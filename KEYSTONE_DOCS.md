@@ -20,6 +20,7 @@ When changing or adding a feature in any of these areas, **also update the match
 | Profile / cover images    | [14-profile-images.md](Keystone/Resources/Help/14-profile-images.md) |
 | Storage location          | [15-storage-location.md](Keystone/Resources/Help/15-storage-location.md) |
 | Inbox folder              | [16-inbox.md](Keystone/Resources/Help/16-inbox.md)                   |
+| Travel area / templates   | [17-travel.md](Keystone/Resources/Help/17-travel.md)                 |
 
 ## Process
 

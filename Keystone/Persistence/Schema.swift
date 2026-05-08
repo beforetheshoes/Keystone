@@ -811,6 +811,98 @@ enum Schema {
         )
     }
 
+    /// v22: introduce the Travel area and its four seeded databases —
+    /// `trips`, `activities`, `lodging`, `transportation` — plus their
+    /// properties. Foundation for the Traveling Snails port (umbrella
+    /// issue #1). Idempotent: `INSERT OR IGNORE` is the established
+    /// reseed-on-known-keys pattern (see v11, v18, v19, v20). Skips
+    /// fresh installs because `Seed.runIfEmpty` writes the same rows
+    /// from a single source of truth on first launch.
+    static func seedTravelAreaV22(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        guard let workspaceID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM workspaces ORDER BY created_at LIMIT 1"
+        ) else { return }
+
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO areas (id, workspace_id, title, accent, sort_index)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+            arguments: ["area-travel", workspaceID, "Travel", "cerulean", 5.0]
+        )
+
+        struct DBRow { let id: String; let name: String; let plural: String; let icon: String; let view: String; let sort: Double }
+        let dbs: [DBRow] = [
+            .init(id: "trips",          name: "Trips",          plural: "Trips",          icon: "T",  view: "list",  sort: 7.0),
+            .init(id: "activities",     name: "Activities",     plural: "Activities",     icon: "Ac", view: "table", sort: 7.1),
+            .init(id: "lodging",        name: "Lodging",        plural: "Lodging",        icon: "L",  view: "table", sort: 7.2),
+            .init(id: "transportation", name: "Transportation", plural: "Transportation", icon: "Tr", view: "table", sort: 7.3),
+        ]
+        for d in dbs {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO databases
+                        (id, workspace_id, area_id, name, plural_name, icon, accent, default_view, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [d.id, workspaceID, "area-travel", d.name, d.plural, d.icon, "cerulean", d.view, now, now, d.sort]
+            )
+        }
+
+        struct P { let db: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let tripsRel = #"{"targetDatabaseID":"trips"}"#
+        let vendorsRel = #"{"targetDatabaseID":"vendors"}"#
+        let props: [P] = [
+            // trips
+            .init(db: "trips", key: "name",         label: "Name",   type: "title",    sort: 0, cfg: "{}"),
+            .init(db: "trips", key: "notes",        label: "Notes",  type: "text",     sort: 1, cfg: "{}"),
+            .init(db: "trips", key: "start_date",   label: "Start",  type: "date",     sort: 2, cfg: "{}"),
+            .init(db: "trips", key: "end_date",     label: "End",    type: "date",     sort: 3, cfg: "{}"),
+            .init(db: "trips", key: "is_protected", label: "Locked", type: "checkbox", sort: 4, cfg: "{}"),
+            // activities
+            .init(db: "activities", key: "name",         label: "Title",  type: "title",    sort: 0, cfg: "{}"),
+            .init(db: "activities", key: "trip",         label: "Trip",   type: "relation", sort: 1, cfg: tripsRel),
+            .init(db: "activities", key: "organization", label: "Vendor", type: "relation", sort: 2, cfg: vendorsRel),
+            .init(db: "activities", key: "start",        label: "Start",  type: "date",     sort: 3, cfg: "{}"),
+            .init(db: "activities", key: "end",          label: "End",    type: "date",     sort: 4, cfg: "{}"),
+            .init(db: "activities", key: "cost",         label: "Cost",   type: "currency", sort: 5, cfg: "{}"),
+            .init(db: "activities", key: "notes",        label: "Notes",  type: "text",     sort: 6, cfg: "{}"),
+            // lodging
+            .init(db: "lodging", key: "name",                label: "Name",         type: "title",    sort: 0, cfg: "{}"),
+            .init(db: "lodging", key: "trip",                label: "Trip",         type: "relation", sort: 1, cfg: tripsRel),
+            .init(db: "lodging", key: "organization",        label: "Vendor",       type: "relation", sort: 2, cfg: vendorsRel),
+            .init(db: "lodging", key: "check_in",            label: "Check-in",     type: "date",     sort: 3, cfg: "{}"),
+            .init(db: "lodging", key: "check_out",           label: "Check-out",    type: "date",     sort: 4, cfg: "{}"),
+            .init(db: "lodging", key: "confirmation_number", label: "Confirmation", type: "text",     sort: 5, cfg: "{}"),
+            .init(db: "lodging", key: "cost",                label: "Cost",         type: "currency", sort: 6, cfg: "{}"),
+            .init(db: "lodging", key: "notes",               label: "Notes",        type: "text",     sort: 7, cfg: "{}"),
+            // transportation
+            .init(db: "transportation", key: "name",         label: "Name",   type: "title",    sort: 0, cfg: "{}"),
+            .init(db: "transportation", key: "trip",         label: "Trip",   type: "relation", sort: 1, cfg: tripsRel),
+            .init(db: "transportation", key: "organization", label: "Vendor", type: "relation", sort: 2, cfg: vendorsRel),
+            .init(db: "transportation", key: "kind",         label: "Kind",   type: "select",   sort: 3, cfg: "{}"),
+            .init(db: "transportation", key: "legs",         label: "Legs",   type: "json",     sort: 4, cfg: "{}"),
+            .init(db: "transportation", key: "cost",         label: "Cost",   type: "currency", sort: 5, cfg: "{}"),
+            .init(db: "transportation", key: "notes",        label: "Notes",  type: "text",     sort: 6, cfg: "{}"),
+        ]
+        for p in props {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.db).\(p.key)", p.db,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+    }
+
     /// Glyph helper duplicated from `DBWrites` so the migration doesn't
     /// have to import the writes module. 1–2 letter capitalized
     /// initials of the title's first words; falls back to the first two

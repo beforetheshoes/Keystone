@@ -292,6 +292,9 @@ enum AppDatabase {
         migrator.registerMigration("v21-remove-legacy-demo-orphans") { db in
             try Schema.removeLegacyDemoOrphansV21(db)
         }
+        migrator.registerMigration("v22-travel-area") { db in
+            try Schema.seedTravelAreaV22(db)
+        }
         migrator.registerMigration("v16-relocate-assets") { db in
             try Schema.relocateAssetsV16(db)
         }

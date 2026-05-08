@@ -229,7 +229,7 @@ enum DBReads {
 
         let placeholders = Array(repeating: "?", count: recIDs.count).joined(separator: ",")
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT pv.record_id, p.key, pv.text_value, pv.number_value, pv.date_value
+            SELECT pv.record_id, p.key, pv.text_value, pv.number_value, pv.date_value, pv.json_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id IN (\(placeholders))
@@ -249,6 +249,8 @@ enum DBReads {
                 }
             } else if let d: String = row["date_value"] {
                 byRecord[rid, default: [:]][key] = d
+            } else if let j: String = row["json_value"] {
+                byRecord[rid, default: [:]][key] = j
             }
         }
 
@@ -311,7 +313,7 @@ enum DBReads {
         """, arguments: [id]) else { return nil }
 
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT p.key, pv.text_value, pv.number_value, pv.date_value
+            SELECT p.key, pv.text_value, pv.number_value, pv.date_value, pv.json_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id = ?
@@ -326,6 +328,8 @@ enum DBReads {
                 values[key] = n.rounded() == n ? String(Int(n)) : String(n)
             } else if let d: String = vrow["date_value"] {
                 values[key] = d
+            } else if let j: String = vrow["json_value"] {
+                values[key] = j
             }
         }
 

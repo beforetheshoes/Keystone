@@ -212,6 +212,7 @@ enum DBWrites {
         var textValue: String? = nil
         var numberValue: Double? = nil
         var dateValue: String? = nil
+        var jsonValue: String? = nil
 
         switch propType {
         case "number":
@@ -220,6 +221,18 @@ enum DBWrites {
         case "date":
             dateValue = trimmed.isEmpty ? nil : trimmed
             textValue = dateValue
+        case "json":
+            // Round-trip valid JSON through json_value; on parse failure
+            // keep the raw string in text_value so partially-typed input
+            // isn't dropped (the editor can re-validate on next commit).
+            if trimmed.isEmpty {
+                jsonValue = nil
+            } else if let data = trimmed.data(using: .utf8),
+                      (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil {
+                jsonValue = trimmed
+            } else {
+                textValue = trimmed
+            }
         default:
             textValue = trimmed.isEmpty ? nil : trimmed
         }
@@ -228,15 +241,16 @@ enum DBWrites {
         // PK conflict is the same as a (record_id, property_id) conflict.
         try db.execute(
             sql: """
-                INSERT INTO property_values (id, record_id, property_id, text_value, number_value, date_value, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO property_values (id, record_id, property_id, text_value, number_value, date_value, json_value, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     text_value = excluded.text_value,
                     number_value = excluded.number_value,
                     date_value = excluded.date_value,
+                    json_value = excluded.json_value,
                     updated_at = excluded.updated_at
             """,
-            arguments: [pvID, recordID, propID, textValue, numberValue, dateValue, now, now]
+            arguments: [pvID, recordID, propID, textValue, numberValue, dateValue, jsonValue, now, now]
         )
 
         try db.execute(
