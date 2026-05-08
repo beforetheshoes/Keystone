@@ -91,27 +91,71 @@ struct iOSCardRow<Leading: View, Trailing: View>: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
-                leading()
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.kstText(size: 15, weight: .semibold))
-                        .foregroundStyle(KstColor.ink0)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.kstText(size: 12))
-                            .foregroundStyle(KstColor.ink2)
-                    }
-                }
-                Spacer(minLength: 0)
-                trailing()
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+            iOSCardRowContent(
+                leading: leading,
+                title: title,
+                subtitle: subtitle,
+                trailing: trailing
+            )
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// `NavigationLink`-driven variant of `iOSCardRow`. Use this inside an
+/// `iPhone*View` whose enclosing `NavigationStack` declares
+/// `.navigationDestination(for: V.self) { ... }`. Tapping the row
+/// appends the value to the stack's path automatically — no local
+/// `@State path` needed and no TCA `setNav` plumbing required.
+struct iOSCardLinkRow<V: Hashable, Leading: View, Trailing: View>: View {
+    let value: V
+    @ViewBuilder var leading: () -> Leading
+    var title: String
+    var subtitle: String?
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        NavigationLink(value: value) {
+            iOSCardRowContent(
+                leading: leading,
+                title: title,
+                subtitle: subtitle,
+                trailing: trailing
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Shared layout for `iOSCardRow` and `iOSCardLinkRow` — the visual
+/// shell, factored out so a Button-wrapped and NavigationLink-wrapped
+/// row look identical.
+private struct iOSCardRowContent<Leading: View, Trailing: View>: View {
+    @ViewBuilder var leading: () -> Leading
+    var title: String
+    var subtitle: String?
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 12) {
+            leading()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.kstText(size: 15, weight: .semibold))
+                    .foregroundStyle(KstColor.ink0)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.kstText(size: 12))
+                        .foregroundStyle(KstColor.ink2)
+                }
+            }
+            Spacer(minLength: 0)
+            trailing()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

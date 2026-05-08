@@ -74,6 +74,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - remote-notification
         # Surfaces the Documents subfolder of our ubiquity container as
         # a user-visible "Keystone" folder in Finder's iCloud Drive
         # sidebar and in Files.app on iPhone/iPad. Without this key the

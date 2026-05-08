@@ -21,10 +21,17 @@ struct DatabaseDetailView: View {
                     .font(.kstDisplay(size: 26, weight: .semibold))
                     .foregroundStyle(KstColor.ink0)
                     .kerning(-0.4)
-                Text("\(store.currentRecords.count)")
-                    .font(.kstText(size: 13))
-                    .monospacedDigit()
-                    .foregroundStyle(KstColor.ink2)
+                if store.viewKind == .table && !store.filters.isEmpty {
+                    Text("\(store.filteredRecords.count) of \(store.currentRecords.count)")
+                        .font(.kstText(size: 13))
+                        .monospacedDigit()
+                        .foregroundStyle(KstColor.ink2)
+                } else {
+                    Text("\(store.currentRecords.count)")
+                        .font(.kstText(size: 13))
+                        .monospacedDigit()
+                        .foregroundStyle(KstColor.ink2)
+                }
                 Spacer()
             }
             .padding(.horizontal, 24)
@@ -33,8 +40,32 @@ struct DatabaseDetailView: View {
             .background(KstColor.paper0)
             .overlay(alignment: .bottom) { KstHairline() }
 
+            // Filter bar above the table only — the gallery / list /
+            // dashboard views render their own slices of the data and
+            // don't currently consume `filteredRecords`. We can extend
+            // them later if useful.
+            if store.viewKind == .table {
+                FilterBar(
+                    store: store,
+                    properties: store.currentProperties,
+                    unfilteredRecords: store.currentRecords
+                )
+            }
+
             switch store.viewKind {
-            case .table:    TableView(db: db, properties: store.currentProperties, records: store.currentRecords, sortKey: store.sortKey, sortAscending: store.sortAscending) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) } onSort: { store.send(.toggleSort($0)) }
+            case .table:    TableView(
+                db: db,
+                properties: store.currentProperties,
+                records: store.filteredRecords,
+                sortKey: store.sortKey,
+                sortAscending: store.sortAscending,
+                onOpen: { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) },
+                onSort: { store.send(.toggleSort($0)) },
+                onOpenRelation: { targetDB, targetID in store.send(.setNav(.record(databaseID: targetDB, recordID: targetID))) },
+                onSetAlignment: { propertyID, alignment in
+                    store.send(.setColumnAlignment(propertyID: propertyID, alignment: alignment))
+                }
+            )
             case .gallery:  GalleryView(db: db, properties: store.currentProperties, records: store.currentRecords) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
             case .list:     ListView(db: db, properties: store.currentProperties, records: store.currentRecords) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
             case .dashboard: DashboardView(db: db, properties: store.currentProperties, records: store.currentRecords)

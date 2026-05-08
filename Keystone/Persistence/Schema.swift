@@ -514,6 +514,314 @@ enum Schema {
         try regenerateImportedBlocksV13(db)
     }
 
+    /// v18: introduce the `vendors` database, flip
+    /// `vehicle_maintenance.vendor` from text to a relation pointing
+    /// at `vendors`, and materialize a vendor record for each distinct
+    /// text value already stored in property_values.
+    ///
+    /// Idempotent — uses INSERT OR IGNORE for the schema rows and a
+    /// case-insensitive title-match dedupe when promoting text values
+    /// to records.
+    static func seedVendorsAndPromoteRelationsV18(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        // No workspace yet → nothing to migrate. The Seed.runIfEmpty
+        // path on first install handles fresh setups separately.
+        guard let workspaceID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM workspaces ORDER BY created_at LIMIT 1"
+        ) else { return }
+
+        // 1. Create the `vendors` database row. Sort it after
+        //    vehicle_maintenance in the Records area.
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO databases
+                    (id, workspace_id, area_id, name, plural_name, icon, accent, default_view, created_at, updated_at, sort_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                "vendors", workspaceID, "area-records",
+                "Vendors", "Vendors",
+                "Vn", "graphite", "table", now, now, 4.7
+            ]
+        )
+
+        // 2. Vendor properties. Schema kept narrow — most are optional
+        //    free-form fields. Users can fill in as needed.
+        struct Prop { let key: String; let label: String; let type: String; let sort: Double }
+        let props: [Prop] = [
+            .init(key: "name",    label: "Name",    type: "title",  sort: 0),
+            .init(key: "kind",    label: "Kind",    type: "select", sort: 1),
+            .init(key: "phone",   label: "Phone",   type: "phone",  sort: 2),
+            .init(key: "email",   label: "Email",   type: "email",  sort: 3),
+            .init(key: "website", label: "Website", type: "url",    sort: 4),
+            .init(key: "address", label: "Address", type: "text",   sort: 5),
+            .init(key: "notes",   label: "Notes",   type: "text",   sort: 6),
+        ]
+        for p in props {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "vendors.\(p.key)", "vendors",
+                    p.key, p.label, p.type, "{}", now, now, p.sort
+                ]
+            )
+        }
+
+        // 3. Flip `vehicle_maintenance.vendor` from text to relation
+        //    pointing at vendors. Idempotent: if it's already relation,
+        //    the UPDATE is a no-op.
+        try db.execute(
+            sql: """
+                UPDATE properties
+                SET type = 'relation',
+                    config_json = ?,
+                    updated_at = ?
+                WHERE id = 'vehicle_maintenance.vendor'
+            """,
+            arguments: [#"{"targetDatabaseID":"vendors"}"#, now]
+        )
+
+        // 4. For every distinct text value still sitting in
+        //    property_values for vehicle_maintenance.vendor, create or
+        //    reuse a vendors record. Reuse is by case-insensitive title
+        //    match so capitalization variants collapse onto one record.
+        let distinctVendorNames = try String.fetchAll(db, sql: """
+            SELECT DISTINCT TRIM(text_value)
+            FROM property_values
+            WHERE property_id = 'vehicle_maintenance.vendor'
+              AND text_value IS NOT NULL
+              AND TRIM(text_value) != ''
+        """)
+
+        // name → record_id, populated as we go
+        var vendorIDByName: [String: String] = [:]
+        for name in distinctVendorNames {
+            // Look for an existing vendor record by case-insensitive title.
+            if let existing = try String.fetchOne(
+                db,
+                sql: """
+                    SELECT id FROM records
+                    WHERE database_id = 'vendors' AND LOWER(title) = LOWER(?)
+                    LIMIT 1
+                """,
+                arguments: [name]
+            ) {
+                vendorIDByName[name.lowercased()] = existing
+                continue
+            }
+            // Create a fresh vendor record.
+            let id = UUID().uuidString
+            let glyph = makeGlyph(from: name)
+            let nextSort = (try Double.fetchOne(
+                db,
+                sql: "SELECT MAX(sort_index) FROM records WHERE database_id = 'vendors'"
+            ) ?? -1) + 1
+            try db.execute(
+                sql: """
+                    INSERT INTO records
+                        (id, database_id, title, glyph, tone, created_at, updated_at, sort_index)
+                    VALUES (?, 'vendors', ?, ?, 'graphite', ?, ?, ?)
+                """,
+                arguments: [id, name, glyph, now, now, nextSort]
+            )
+            vendorIDByName[name.lowercased()] = id
+        }
+
+        // 5. For every property_value row referencing the now-relation
+        //    vendor property, create a relations row from the source
+        //    record to the matching vendor, then delete the
+        //    property_value. Mark the property_value's SyncMetadata as
+        //    `_isDeleted=true` so the deletion propagates to CloudKit
+        //    (raw DELETEs in a migration bypass the SyncEngine
+        //    triggers — see regenerateImportedBlocksV13's comment).
+        let pvRows = try Row.fetchAll(db, sql: """
+            SELECT id AS pv_id, record_id, TRIM(text_value) AS vendor_name
+            FROM property_values
+            WHERE property_id = 'vehicle_maintenance.vendor'
+              AND text_value IS NOT NULL
+              AND TRIM(text_value) != ''
+        """)
+
+        let metadataAttached = (try? Int.fetchOne(db, sql: """
+            SELECT COUNT(*) FROM pragma_database_list WHERE name = 'sqlitedata_icloud'
+        """) ?? 0) ?? 0
+
+        for row in pvRows {
+            let pvID: String = row["pv_id"]
+            let sourceRecordID: String = row["record_id"]
+            let name: String = row["vendor_name"]
+            guard let vendorID = vendorIDByName[name.lowercased()] else { continue }
+
+            let relID = UUID().uuidString
+            try db.execute(
+                sql: """
+                    INSERT INTO relations
+                        (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                    VALUES (?, ?, ?, 'linked', 'vehicle_maintenance.vendor', ?, ?)
+                """,
+                arguments: [relID, sourceRecordID, vendorID, now, now]
+            )
+
+            if metadataAttached > 0 {
+                try? db.execute(
+                    sql: """
+                        UPDATE sqlitedata_icloud.sqlitedata_icloud_metadata
+                        SET _isDeleted = 1
+                        WHERE recordType = 'property_values' AND recordPrimaryKey = ?
+                    """,
+                    arguments: [pvID]
+                )
+            }
+            try db.execute(sql: "DELETE FROM property_values WHERE id = ?", arguments: [pvID])
+        }
+    }
+
+    /// v19: add a `place_id` property to vendors so we can store the
+    /// Apple Place ID returned from MapKit lookups. Place IDs are
+    /// opaque, persistent identifiers — keep one on a vendor and we
+    /// can re-resolve fresh phone/website/address forever via
+    /// `MKMapItemRequest(mapItemIdentifier:)`. Stored as text; users
+    /// don't edit this directly.
+    ///
+    /// Guarded on the existence of the `vendors` database — on a
+    /// fresh install the migrations run before `Seed.runIfEmpty`,
+    /// so the vendors database doesn't exist yet. In that case we
+    /// skip the insert; `Seed.runIfEmpty` will create the property
+    /// itself when it seeds the canonical structural rows.
+    static func addVendorPlaceIDPropertyV19(_ db: Database) throws {
+        let vendorsExists = (try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM databases WHERE id = 'vendors'"
+        ) ?? 0) > 0
+        guard vendorsExists else { return }
+
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        // Sort below the existing notes property — it's machine data
+        // rather than human-curated.
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO properties
+                    (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            """,
+            arguments: [
+                "vendors.place_id", "vendors",
+                "place_id", "Apple Place ID", "text", "{}",
+                now, now, 7
+            ]
+        )
+    }
+
+    /// v21: targeted removal of legacy demo-seed orphans that survived
+    /// the v7 demo-data wipe. Earlier builds seeded records with literal
+    /// IDs `p1…p8`, `pet1…pet2`, `h1…h2`, `v1…v3`, `d1…d6`, `e1…e4`,
+    /// `m1…m4` plus their child property_values keyed `<id>.<propkey>`.
+    /// v7 deleted the records, but the FK was added later (v10), so
+    /// ON DELETE CASCADE didn't fire and the child property_values
+    /// leaked through every subsequent table-rebuild. They surface now
+    /// as `PRAGMA foreign_key_check` violations on first sync to a
+    /// fresh device, which crashes the app at boot.
+    ///
+    /// This migration is one-shot, narrow, and only deletes rows whose
+    /// `record_id` matches the legacy demo-ID pattern — real records
+    /// use UUIDs, so collisions are impossible. Safe to ship.
+    static func removeLegacyDemoOrphansV21(_ db: Database) throws {
+        let demoIDs = [
+            "p1","p2","p3","p4","p5","p6","p7","p8",
+            "pet1","pet2",
+            "h1","h2",
+            "v1","v2","v3",
+            "d1","d2","d3","d4","d5","d6",
+            "e1","e2","e3","e4",
+            "m1","m2","m3","m4",
+        ]
+        let placeholders = Array(repeating: "?", count: demoIDs.count).joined(separator: ",")
+        let args = StatementArguments(demoIDs)
+
+        for table in ["property_values", "blocks", "record_tags"] {
+            let n = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM \(table) WHERE record_id IN (\(placeholders))",
+                arguments: args
+            ) ?? 0
+            if n > 0 {
+                try db.execute(
+                    sql: "DELETE FROM \(table) WHERE record_id IN (\(placeholders))",
+                    arguments: args
+                )
+            }
+        }
+
+        // relations: both endpoints can be the demo IDs.
+        let nRel = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*) FROM relations
+                WHERE source_record_id IN (\(placeholders))
+                   OR target_record_id IN (\(placeholders))
+            """,
+            arguments: args + args
+        ) ?? 0
+        if nRel > 0 {
+            try db.execute(
+                sql: """
+                    DELETE FROM relations
+                    WHERE source_record_id IN (\(placeholders))
+                       OR target_record_id IN (\(placeholders))
+                """,
+                arguments: args + args
+            )
+        }
+    }
+
+    /// v20: add a `locality` property to vendors — a compact "City, ST"
+    /// string suitable for table-cell display. Populated by
+    /// `VendorLookupService.extract` from `MKAddressRepresentations.
+    /// cityWithContext(.short)` so it disambiguates duplicate cities
+    /// (Springfield, IL vs Springfield, MA) without dragging in the
+    /// full multi-line address.
+    ///
+    /// Same fresh-install guard as v19.
+    static func addVendorLocalityPropertyV20(_ db: Database) throws {
+        let vendorsExists = (try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM databases WHERE id = 'vendors'"
+        ) ?? 0) > 0
+        guard vendorsExists else { return }
+
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        // Sort right after the full address (sort_index 5).
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO properties
+                    (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            """,
+            arguments: [
+                "vendors.locality", "vendors",
+                "locality", "City", "text", "{}",
+                now, now, 5.5
+            ]
+        )
+    }
+
+    /// Glyph helper duplicated from `DBWrites` so the migration doesn't
+    /// have to import the writes module. 1–2 letter capitalized
+    /// initials of the title's first words; falls back to the first two
+    /// characters if there are no word breaks.
+    private static func makeGlyph(from title: String) -> String {
+        let words = title.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).prefix(2)
+        let chars = words.compactMap { $0.first.map(String.init) }.joined().uppercased()
+        if chars.isEmpty { return String(title.prefix(2)).uppercased() }
+        return String(chars.prefix(2))
+    }
+
     /// v16: move existing assets from the legacy flat
     /// `Assets/<uuid>.<ext>` layout into the per-record layout
     /// `Assets/<Database>/<Title>-<shortID>/<original_filename>`. Files

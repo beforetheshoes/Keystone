@@ -53,6 +53,9 @@ enum KeystoneCLI {
             case "create-block":        try createBlock(args: rest)
             case "delete-block":        try deleteBlock(args: rest)
             case "sql":                 try runSQL(args: rest)
+            case "enrich-vendor":       try enrichVendor(args: rest)
+            case "enrich-all-vendors":  try enrichAllVendors(args: rest)
+            case "promote-relations":   try promoteRelations()
             case "help", "-h", "--help":
                 printUsage()
             default:
@@ -346,6 +349,234 @@ enum KeystoneCLI {
             try DBWrites.deleteBlock(db, blockID: blockID)
         }
         emit(["ok": true, "block_id": blockID])
+    }
+
+    // MARK: - Vendor enrichment
+
+    /// Promote every text-fallback relation value into a real
+    /// `relations` row, auto-creating stub target records when needed.
+    /// Useful for cleaning up batches of imports that landed before the
+    /// `updatePropertyValue` auto-create code was in place.
+    private static func promoteRelations() throws {
+        @Dependency(\.defaultDatabase) var database
+        let result: (Int, Int) = try database.write { db in
+            try DBWrites.backfillRelationsByTitleWithAutoCreate(db)
+        }
+        emit([
+            "links_created": result.0,
+            "stubs_created": result.1,
+        ])
+    }
+
+    /// Enrich a single vendor: look up phone/website/address/place_id
+    /// from Apple Maps and write any fields that are blank on the
+    /// vendor record. `--overwrite` overrides existing values.
+    private static func enrichVendor(args: [String]) throws {
+        guard let vendorID = args.first else {
+            stderr("usage: enrich-vendor <vendorID> [--overwrite]")
+            exit(1)
+        }
+        let overwrite = args.contains("--overwrite")
+        let result = runEnrichment(vendorIDs: [vendorID], overwrite: overwrite)
+        emit(result)
+    }
+
+    /// Walk every vendor record, attempt enrichment, apply blanks-only
+    /// (or all fields with `--overwrite`). Reports per-vendor outcomes
+    /// so it's clear which vendors got data and which need manual help.
+    private static func enrichAllVendors(args: [String]) throws {
+        let overwrite = args.contains("--overwrite")
+        let onlyMissing = args.contains("--only-missing-place-id")
+        @Dependency(\.defaultDatabase) var database
+        let vendorIDs: [String] = try database.read { db in
+            var sql = """
+                SELECT r.id FROM records r
+                WHERE r.database_id = 'vendors' AND r.deleted_at IS NULL
+            """
+            if onlyMissing {
+                sql += """
+                  AND r.id NOT IN (
+                    SELECT pv.record_id FROM property_values pv
+                    WHERE pv.property_id = 'vendors.place_id'
+                      AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                  )
+                """
+            }
+            sql += " ORDER BY r.title"
+            return try String.fetchAll(db, sql: sql)
+        }
+        let result = runEnrichment(vendorIDs: vendorIDs, overwrite: overwrite)
+        emit(result)
+    }
+
+    private static func runEnrichment(vendorIDs: [String], overwrite: Bool) -> [String: Any] {
+        guard #available(macOS 26.0, *) else {
+            stderr("enrichment requires macOS 26 or later")
+            exit(1)
+        }
+        @Dependency(\.defaultDatabase) var database
+
+        var resolved = 0
+        var ambiguous = 0
+        var notFound = 0
+        var failed = 0
+        var perVendor: [[String: Any]] = []
+
+        for vendorID in vendorIDs {
+            // Fetch vendor's current name + address from the DB.
+            let snapshot: (name: String, address: String?, placeID: String?)? = try? database.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: "SELECT title FROM records WHERE id = ? AND database_id = 'vendors'",
+                    arguments: [vendorID]
+                ) else { return nil }
+                let title: String = row["title"]
+                let addr = try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT pv.text_value FROM property_values pv
+                        WHERE pv.record_id = ? AND pv.property_id = 'vendors.address'
+                          AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                        LIMIT 1
+                    """,
+                    arguments: [vendorID]
+                )
+                let pid = try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT pv.text_value FROM property_values pv
+                        WHERE pv.record_id = ? AND pv.property_id = 'vendors.place_id'
+                          AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                        LIMIT 1
+                    """,
+                    arguments: [vendorID]
+                )
+                return (title, addr, pid)
+            }
+            guard let (name, addressHint, existingPlaceID) = snapshot else {
+                stderr("enrich-vendor \(vendorID): no such vendor")
+                failed += 1
+                continue
+            }
+
+            // Run the network call synchronously per-vendor. Sequential
+            // is intentional — Apple's MKLocalSearch starts to throttle
+            // on concurrent bursts and we'd rather take a few minutes
+            // for 30 vendors than burn rate-limit budget.
+            // NOTE: do NOT mark this closure `@MainActor`. The CLI runs
+            // on the main thread and blocks on `runAsyncBlocking`'s
+            // semaphore. If the body needs MainActor, the Task can't
+            // make progress → deadlock. MapKit's MKMapItemRequest /
+            // MKLocalSearch don't require MainActor; the autocomplete
+            // path already hops to MainActor internally.
+            let outcome = runAsyncBlocking {
+                if let pid = existingPlaceID,
+                   let item = await VendorLookupService.refresh(placeID: pid) {
+                    return EnrichmentOutcome.resolved(VendorLookupService.extract(from: item))
+                }
+                return await VendorLookupService.enrich(name: name, address: addressHint)
+            }
+
+            switch outcome {
+            case .resolved(let enrichment):
+                let applied = applyEnrichment(enrichment, to: vendorID, overwrite: overwrite)
+                resolved += 1
+                perVendor.append([
+                    "vendor_id": vendorID,
+                    "title": name,
+                    "outcome": "resolved",
+                    "applied_fields": applied,
+                ])
+                stderr("  ✓ \(name) — \(applied.joined(separator: ", "))")
+            case .ambiguous(let candidates):
+                ambiguous += 1
+                let names: [String] = candidates.compactMap { $0.placeID == nil ? nil : ($0.placeID ?? "") }
+                perVendor.append([
+                    "vendor_id": vendorID,
+                    "title": name,
+                    "outcome": "ambiguous",
+                    "candidate_count": candidates.count,
+                    "candidate_place_ids": names,
+                ])
+                stderr("  ? \(name) — \(candidates.count) candidates, skipped")
+            case .notFound:
+                notFound += 1
+                perVendor.append([
+                    "vendor_id": vendorID,
+                    "title": name,
+                    "outcome": "not_found",
+                ])
+                stderr("  · \(name) — no MapKit match")
+            }
+        }
+
+        return [
+            "total": vendorIDs.count,
+            "resolved": resolved,
+            "ambiguous": ambiguous,
+            "not_found": notFound,
+            "failed": failed,
+            "vendors": perVendor,
+        ]
+    }
+
+    /// Apply non-empty enrichment fields to the vendor record. By
+    /// default skips fields that already have a value; with
+    /// `overwrite=true` clobbers existing values too. Returns the list
+    /// of property keys that were actually written.
+    private static func applyEnrichment(_ enrichment: VendorEnrichment, to vendorID: String, overwrite: Bool) -> [String] {
+        @Dependency(\.defaultDatabase) var database
+        var applied: [String] = []
+        let fields: [(String, String?)] = [
+            ("phone",    enrichment.phone),
+            ("website",  enrichment.website),
+            ("address",  enrichment.address),
+            ("locality", enrichment.locality),
+            ("kind",     enrichment.kind),
+            ("place_id", enrichment.placeID),
+        ]
+        for (key, valueOpt) in fields {
+            guard let value = valueOpt, !value.isEmpty else { continue }
+            // Look up current value to honor overwrite=false.
+            let currentValue: String? = try? database.read { db in
+                try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT pv.text_value FROM property_values pv
+                        WHERE pv.record_id = ? AND pv.property_id = ?
+                          AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                        LIMIT 1
+                    """,
+                    arguments: [vendorID, "vendors.\(key)"]
+                )
+            }
+            if !overwrite, currentValue != nil { continue }
+            // Use DBWrites.updatePropertyValue so type coercion (and
+            // future relation-property semantics) match the rest of
+            // the app.
+            try? database.write { db in
+                try DBWrites.updatePropertyValue(db, recordID: vendorID, propertyKey: key, value: value)
+            }
+            applied.append(key)
+        }
+        return applied
+    }
+
+    /// Drive an `async` task to completion from a synchronous CLI
+    /// command. We can't just block on a semaphore — MapKit's
+    /// network callbacks need the main thread's run loop to spin —
+    /// so we keep CFRunLoop running until the Task completes and
+    /// then stop it. CLI commands are short-lived, single-flight.
+    private static func runAsyncBlocking<T: Sendable>(_ body: @Sendable @escaping () async -> T) -> T {
+        nonisolated(unsafe) var result: T? = nil
+        nonisolated(unsafe) let runLoop = CFRunLoopGetCurrent()
+        Task { @Sendable in
+            let value = await body()
+            result = value
+            CFRunLoopStop(runLoop)
+        }
+        CFRunLoopRun()
+        return result!
     }
 
     private static func runSQL(args: [String]) throws {

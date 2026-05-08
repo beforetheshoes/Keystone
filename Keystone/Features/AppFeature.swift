@@ -28,6 +28,16 @@ struct AppFeature {
         var viewKind: ViewKind = .table
         var sortKey: String?
         var sortAscending: Bool = true
+        /// Filters applied to `currentRecords`. Reset on database
+        /// switch (handled in `setNav`) so each database starts with a
+        /// clean slate. Persistence to `views.config_json` is a future
+        /// extension — these are session-only for now.
+        var filters: [Filter] = []
+        /// Convenience: records after filtering. SwiftUI re-derives this
+        /// when `filters` or `currentRecords` change.
+        var filteredRecords: [RecordRow] {
+            FilterEngine.apply(filters, to: currentRecords, properties: currentProperties)
+        }
 
         // Record detail state (reset on record change)
         var currentRecord: RecordRow?
@@ -125,6 +135,20 @@ struct AppFeature {
         case recordLoaded(record: RecordRow?, related: [RecordRow])
         case setViewKind(ViewKind)
         case toggleSort(String)
+        /// Persist a per-column alignment override on the property's
+        /// `config_json`. Pass `nil` for `alignment` to clear the
+        /// override and fall back to the type-aware default.
+        case setColumnAlignment(propertyID: String, alignment: PropertyAlignment?)
+        /// Add a fresh empty filter for the given property. The
+        /// predicate type is derived from the property's type.
+        case addFilter(propertyKey: String)
+        /// Replace a filter's predicate (typically called as the user
+        /// edits the filter in the UI).
+        case updateFilter(id: String, predicate: FilterPredicate)
+        /// Remove an active filter by id.
+        case removeFilter(id: String)
+        /// Clear every active filter.
+        case clearFilters
         case openPalette
         case closePalette
         case palettePickIndex(Int)
@@ -147,6 +171,7 @@ struct AppFeature {
         case blockTextChanged(blockID: String, text: AttributedString)
         case blockKindChanged(blockID: String, kind: BlockKind)
         case blockCheckedChanged(blockID: String, checked: Bool)
+        case blockTableEdited(blockID: String, table: BlockTableData)
         case blockReturnPressed(blockID: String, before: AttributedString, after: AttributedString)
         case blockBackspaceOnEmpty(blockID: String)
         case blockShortcutTriggered(blockID: String, newKind: BlockKind, remainder: AttributedString)
@@ -260,7 +285,31 @@ struct AppFeature {
                         for await _ in imports {
                             await send(.refreshSidebar)
                             await send(.refreshCurrentRecords)
+                            // An Inbox import may have auto-created
+                            // vendor stubs (e.g. from `vendor: <name>`
+                            // frontmatter on Vehicle Maintenance
+                            // records). Kick the enrichment service so
+                            // the new stubs get phone/website/address
+                            // from MapKit immediately rather than
+                            // waiting for next launch.
+                            #if canImport(MapKit)
+                            if #available(iOS 26.0, macOS 26.0, *) {
+                                await VendorEnrichmentService.shared.enrichPending()
+                            }
+                            #endif
                         }
+                    },
+                    .run { _ in
+                        // Initial enrichment pass on launch — catches
+                        // vendors that arrived via CloudKit, were
+                        // created while the app was offline, or were
+                        // left ambiguous on a previous run that the
+                        // user has since resolved manually.
+                        #if canImport(MapKit)
+                        if #available(iOS 26.0, macOS 26.0, *) {
+                            VendorEnrichmentService.shared.start()
+                        }
+                        #endif
                     }
                 )
 
@@ -274,6 +323,7 @@ struct AppFeature {
                 state.nav = nav
                 state.sortKey = nil
                 state.sortAscending = true
+                state.filters = []
                 switch nav {
                 case .home, .help:
                     state.currentDB = nil
@@ -371,6 +421,53 @@ struct AppFeature {
                     state.sortKey = key
                     state.sortAscending = true
                 }
+                return .none
+
+            case let .setColumnAlignment(propertyID, alignment):
+                // Optimistic local update so the column re-aligns
+                // immediately, then persist via the property writer.
+                if let idx = state.currentProperties.firstIndex(where: { $0.id == propertyID }) {
+                    var newConfig = state.currentProperties[idx].config
+                    newConfig.alignment = alignment
+                    let newJSON = newConfig.encoded()
+                    state.currentProperties[idx] = PropertyRow(
+                        id: state.currentProperties[idx].id,
+                        key: state.currentProperties[idx].key,
+                        name: state.currentProperties[idx].name,
+                        type: state.currentProperties[idx].type,
+                        sortIndex: state.currentProperties[idx].sortIndex,
+                        configJSON: newJSON
+                    )
+                }
+                return .run { _ in
+                    try? dbClient.setPropertyAlignment(propertyID, alignment)
+                }
+
+            case let .addFilter(propertyKey):
+                guard let prop = state.currentProperties.first(where: { $0.key == propertyKey })
+                else { return .none }
+                // Don't double-add — if a filter already exists for this
+                // column, reuse it (and let the user edit it). Keeps the
+                // bar tidy and avoids duplicate-AND chains.
+                if state.filters.contains(where: { $0.propertyKey == propertyKey }) {
+                    return .none
+                }
+                let predicate = FilterPredicateFactory.empty(for: prop.type)
+                state.filters.append(Filter(propertyKey: propertyKey, predicate: predicate))
+                return .none
+
+            case let .updateFilter(id, predicate):
+                if let idx = state.filters.firstIndex(where: { $0.id == id }) {
+                    state.filters[idx].predicate = predicate
+                }
+                return .none
+
+            case let .removeFilter(id):
+                state.filters.removeAll { $0.id == id }
+                return .none
+
+            case .clearFilters:
+                state.filters = []
                 return .none
 
             case .openPalette:
@@ -563,6 +660,18 @@ struct AppFeature {
                 }
                 return .run { _ in
                     try? dbClient.updateBlockChecked(blockID, checked)
+                }
+
+            case let .blockTableEdited(blockID, table):
+                // Optimistic update of the loaded record's blocks so the
+                // UI reflects the cell/row/column edit immediately, then
+                // persist to disk in a background effect. Mirrors the
+                // pattern used for text/checked edits.
+                if let idx = state.currentBlocks.firstIndex(where: { $0.id == blockID }) {
+                    state.currentBlocks[idx].tableData = table
+                }
+                return .run { _ in
+                    try? dbClient.updateBlockTable(blockID, table)
                 }
 
             case let .blockReturnPressed(blockID, before, after):

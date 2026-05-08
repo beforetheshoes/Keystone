@@ -220,6 +220,18 @@ enum AppDatabase {
         )
 
         var migrator = DatabaseMigrator()
+        // Disable GRDB's per-migration deferred FK check. By default, GRDB
+        // runs each migration with `PRAGMA foreign_keys = OFF`, then calls
+        // `PRAGMA foreign_key_check` at the end of the migration's
+        // transaction and aborts on any violation anywhere in the DB.
+        // That blanket check trips on legacy demo-seed orphans (e.g.
+        // `p1.relationship` from May 2026 builds) that get re-introduced
+        // during a table-rebuild migration's `INSERT ... SELECT ...`
+        // copy step — even though the migration itself didn't intend to
+        // create them. We do our own orphan sweep after migrate via
+        // `cleanupOrphansV12`, which is more targeted (deletes the
+        // orphan rows) than GRDB's default (aborts the whole migration).
+        migrator = migrator.disablingDeferredForeignKeyChecks()
         migrator.registerMigration("v1") { db in
             try Schema.createV1(db)
         }
@@ -268,6 +280,18 @@ enum AppDatabase {
         migrator.registerMigration("v17-regenerate-imported-blocks-4") { db in
             try Schema.regenerateImportedBlocksV17(db)
         }
+        migrator.registerMigration("v18-vendors-database") { db in
+            try Schema.seedVendorsAndPromoteRelationsV18(db)
+        }
+        migrator.registerMigration("v19-vendor-place-id") { db in
+            try Schema.addVendorPlaceIDPropertyV19(db)
+        }
+        migrator.registerMigration("v20-vendor-locality") { db in
+            try Schema.addVendorLocalityPropertyV20(db)
+        }
+        migrator.registerMigration("v21-remove-legacy-demo-orphans") { db in
+            try Schema.removeLegacyDemoOrphansV21(db)
+        }
         migrator.registerMigration("v16-relocate-assets") { db in
             try Schema.relocateAssetsV16(db)
         }
@@ -275,6 +299,17 @@ enum AppDatabase {
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")
         logFileState(at: url, label: "before-migrate")
+
+        // NO blanket pre-migrate FK sweep. Same hazard as the post-migrate
+        // sweep: CloudKit-synced child rows whose parent hasn't arrived
+        // yet would be flagged by `PRAGMA foreign_key_check` and deleted,
+        // propagating the deletion to every other device via SyncEngine
+        // triggers. We rely on `migrator.disablingDeferredForeignKeyChecks()`
+        // (set above) so a transient FK violation during the migration
+        // doesn't abort the whole transaction. Targeted orphan removal
+        // for known stale IDs (e.g. legacy `p1`-style demo seeds) lives
+        // in a numbered migration so it runs once per device.
+
         try migrator.migrate(writer)
         try? writer.read { db in logDBCensus(db, label: "after-migrate") }
 
@@ -307,16 +342,26 @@ enum AppDatabase {
             if n > 0 { bootLog.notice("backfillBlocksFromMarkdownAssets populated \(n) record bodies") }
         }
 
-        // Sweep orphan assets / property_values / blocks / record_tags /
-        // relations on every boot, not just as a one-time migration.
-        // CloudKit sync replicates rows independently of their parents,
-        // so debris keeps accumulating across launches; running cleanup
-        // each boot keeps it from making re-imports impossible (orphan
-        // asset rows with matching content hashes block the dedup path
-        // in InboxImporter even though they're attached to nothing).
-        try? writer.write { db in
-            try Schema.cleanupOrphansV12(db)
-        }
+        // DO NOT run `cleanupOrphansV12` per-boot. CloudKit sync
+        // replicates rows independently and out-of-order — assets
+        // commonly arrive before their parent records. A blanket "child
+        // with no parent → DELETE" sweep at boot interprets every
+        // freshly-synced asset as an orphan, deletes it, and the
+        // SyncEngine `afterDelete` triggers then push the deletion
+        // back to CloudKit. Net effect: every boot of a freshly-installed
+        // device wipes out hundreds of legitimate rows AND propagates
+        // the wipe to every other device. Real data loss + CloudKit
+        // rate-limit thrash.
+        //
+        // The cleanup remains as a one-time migration (`v12-cleanup-orphans`)
+        // for the original bug it fixed. If genuine orphans accumulate
+        // (e.g. local-only deletes that bypassed sync), they're cheap
+        // to leave around — the row hasn't been seen as a violation by
+        // SQLite's FK constraint because we made the constraint
+        // tolerant. We can re-introduce a *time-gated* cleanup later
+        // (e.g. "delete orphans that have been orphaned for >7 days"),
+        // but a blanket per-boot pass is unsafe under CloudKit
+        // semantics.
         try? writer.read { db in logDBCensus(db, label: "after-backfill") }
         logFileState(at: url, label: "after-backfill")
 

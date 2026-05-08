@@ -26,6 +26,107 @@ struct PropertyRow: Equatable, Sendable, Identifiable {
     let name: String
     let type: PropertyType
     let sortIndex: Double
+    /// Raw `config_json` blob from the `properties` row. Parsed on demand
+    /// via `config` so callers that don't need it pay nothing.
+    let configJSON: String
+
+    var config: PropertyConfig {
+        PropertyConfig.parse(configJSON)
+    }
+
+    /// The column alignment to use in tables. Honors an explicit
+    /// `alignment` from the property's config; otherwise falls back to a
+    /// type-aware default — numbers and currency right, select/checkbox
+    /// center, everything else left.
+    var resolvedAlignment: PropertyAlignment {
+        if let explicit = config.alignment { return explicit }
+        switch type {
+        case .number, .currency:        return .right
+        case .select, .checkbox:        return .center
+        default:                        return .leading
+        }
+    }
+}
+
+/// Decoded form of `properties.config_json`. Only the fields we
+/// understand are decoded; unknown JSON keys are preserved by re-encoding
+/// from the raw dictionary in `merging(_:)` so a write doesn't strip
+/// targetDatabaseID or other configs we don't model here.
+struct PropertyConfig: Equatable, Sendable {
+    /// Optional explicit alignment override. `nil` means "use the
+    /// type-aware default" (`PropertyRow.resolvedAlignment`).
+    var alignment: PropertyAlignment?
+    /// Optional formatting for number/currency columns. `nil` means
+    /// "use the type-aware default" (currency type → USD, number → none).
+    var format: PropertyFormat?
+    /// Currency code for `.currency` formatting. Defaults to "USD"
+    /// when format is `.currency` but no code is set.
+    var currencyCode: String?
+    /// Verbatim JSON-encoded blob of other keys we don't model directly
+    /// here (e.g. `targetDatabaseID` for relations). Stored as a string
+    /// so the struct stays `Sendable` — writes round-trip via `encoded()`
+    /// without stripping these keys.
+    var rawExtrasJSON: String
+
+    static let empty = PropertyConfig(alignment: nil, format: nil, currencyCode: nil, rawExtrasJSON: "{}")
+
+    static func parse(_ json: String) -> PropertyConfig {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .empty
+        }
+        var extras = obj
+        let alignment = (obj["alignment"] as? String).flatMap(PropertyAlignment.init(rawValue:))
+        let format = (obj["format"] as? String).flatMap(PropertyFormat.init(rawValue:))
+        let code = obj["currencyCode"] as? String
+        extras.removeValue(forKey: "alignment")
+        extras.removeValue(forKey: "format")
+        extras.removeValue(forKey: "currencyCode")
+        let extrasJSON: String = {
+            guard let data = try? JSONSerialization.data(withJSONObject: extras),
+                  let str = String(data: data, encoding: .utf8) else { return "{}" }
+            return str
+        }()
+        return PropertyConfig(alignment: alignment, format: format, currencyCode: code, rawExtrasJSON: extrasJSON)
+    }
+
+    /// Re-encode the config back to a JSON string, preserving any
+    /// unknown keys captured in `rawExtrasJSON`. Stable key ordering is
+    /// not guaranteed; SQLite doesn't care.
+    func encoded() -> String {
+        var obj: [String: Any] = {
+            guard let data = rawExtrasJSON.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return parsed
+        }()
+        if let alignment { obj["alignment"] = alignment.rawValue }
+        if let format { obj["format"] = format.rawValue }
+        if let currencyCode { obj["currencyCode"] = currencyCode }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let str = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return str
+    }
+}
+
+enum PropertyAlignment: String, Sendable, Equatable, CaseIterable {
+    case leading
+    case center
+    case right
+}
+
+enum PropertyFormat: String, Sendable, Equatable {
+    case currency
+    case decimal
+    case integer
+    case percent
+}
+
+struct RelationTarget: Equatable, Sendable {
+    let recordID: String
+    let databaseID: String
+    let title: String
 }
 
 struct RecordRow: Equatable, Sendable, Identifiable {
@@ -36,6 +137,11 @@ struct RecordRow: Equatable, Sendable, Identifiable {
     let tone: AccentTone
     let sortIndex: Double
     var values: [String: String] = [:]
+    /// Outgoing relations keyed by the property key. Populated alongside
+    /// `values` so a cell renderer that wants to navigate to a related
+    /// record (e.g., the table view's Vendor or Vehicle column) can
+    /// look up the target's id + database without a second query.
+    var relationTargets: [String: [RelationTarget]] = [:]
     var coverAssetID: String? = nil
     var coverRelativePath: String? = nil
 
@@ -95,14 +201,15 @@ enum DBReads {
 
     static func properties(_ db: Database, databaseID: String) throws -> [PropertyRow] {
         try Row.fetchAll(db, sql: """
-            SELECT id, key, name, type, sort_index FROM properties WHERE database_id = ? AND is_archived = 0 ORDER BY sort_index
+            SELECT id, key, name, type, sort_index, config_json FROM properties WHERE database_id = ? AND is_archived = 0 ORDER BY sort_index
         """, arguments: [databaseID]).map { row in
             PropertyRow(
                 id: row["id"],
                 key: row["key"],
                 name: row["name"],
                 type: PropertyType(rawValue: row["type"]) ?? .text,
-                sortIndex: row["sort_index"]
+                sortIndex: row["sort_index"],
+                configJSON: row["config_json"] ?? "{}"
             )
         }
     }
@@ -146,26 +253,35 @@ enum DBReads {
         }
 
         // Fold relation links into `values` so list/table cells render the
-        // target record's title. Best-effort — if any relation row trips
-        // (e.g. orphaned property_id, broken FK from a sync conflict), we
+        // target record's title. Also collect the target's record_id +
+        // database_id under `relationTargets` so callers (e.g. the table
+        // view) can navigate straight to the related record without a
+        // second query. Best-effort — if any relation row trips (e.g.
+        // orphaned property_id, broken FK from a sync conflict), we
         // skip the relation labels rather than failing the whole records
         // fetch and leaving the table view empty.
         let relRows: [Row] = (try? Row.fetchAll(db, sql: """
-            SELECT rel.source_record_id, p.key, tr.title AS target_title
+            SELECT rel.source_record_id, p.key,
+                   tr.id AS target_id, tr.database_id AS target_db, tr.title AS target_title
             FROM relations rel
             JOIN properties p ON p.id = rel.property_id
             JOIN records tr ON tr.id = rel.target_record_id
             WHERE rel.source_record_id IN (\(placeholders))
         """, arguments: StatementArguments(recIDs))) ?? []
+        var relationsByRecord: [String: [String: [RelationTarget]]] = [:]
         for row in relRows {
             guard let rid: String = row["source_record_id"],
                   let key: String = row["key"],
+                  let targetID: String = row["target_id"],
+                  let targetDB: String = row["target_db"],
                   let title: String = row["target_title"] else { continue }
             if let existing = byRecord[rid]?[key], !existing.isEmpty {
                 byRecord[rid, default: [:]][key] = existing + ", " + title
             } else {
                 byRecord[rid, default: [:]][key] = title
             }
+            relationsByRecord[rid, default: [:]][key, default: []]
+                .append(RelationTarget(recordID: targetID, databaseID: targetDB, title: title))
         }
 
         return recRows.map { row in
@@ -178,6 +294,7 @@ enum DBReads {
                 tone: AccentTone(rawValue: row["tone"]) ?? .graphite,
                 sortIndex: row["sort_index"],
                 values: byRecord[rid] ?? [:],
+                relationTargets: relationsByRecord[rid] ?? [:],
                 coverAssetID: row["cover_asset_id"],
                 coverRelativePath: row["cover_relative_path"]
             )
@@ -214,22 +331,30 @@ enum DBReads {
 
         // Fold relation link target titles into `values` so the property
         // grid's display path sees the same shape as text/number/date.
-        // Best-effort — see the matching block in `records()` for why.
+        // Also gather target IDs in `relationTargets` so callers can
+        // navigate to the linked record. Best-effort — see the matching
+        // block in `records()` for why.
         let relRows: [Row] = (try? Row.fetchAll(db, sql: """
-            SELECT p.key, tr.title AS target_title
+            SELECT p.key,
+                   tr.id AS target_id, tr.database_id AS target_db, tr.title AS target_title
             FROM relations rel
             JOIN properties p ON p.id = rel.property_id
             JOIN records tr ON tr.id = rel.target_record_id
             WHERE rel.source_record_id = ?
         """, arguments: [id])) ?? []
+        var relationTargets: [String: [RelationTarget]] = [:]
         for vrow in relRows {
             guard let key: String = vrow["key"],
+                  let targetID: String = vrow["target_id"],
+                  let targetDB: String = vrow["target_db"],
                   let title: String = vrow["target_title"] else { continue }
             if let existing = values[key], !existing.isEmpty {
                 values[key] = existing + ", " + title
             } else {
                 values[key] = title
             }
+            relationTargets[key, default: []]
+                .append(RelationTarget(recordID: targetID, databaseID: targetDB, title: title))
         }
 
         return RecordRow(
@@ -240,6 +365,7 @@ enum DBReads {
             tone: AccentTone(rawValue: row["tone"]) ?? .graphite,
             sortIndex: row["sort_index"],
             values: values,
+            relationTargets: relationTargets,
             coverAssetID: row["cover_asset_id"],
             coverRelativePath: row["cover_relative_path"]
         )

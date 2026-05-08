@@ -19,12 +19,16 @@ struct DatabaseClient: Sendable {
     var updatePropertyValue: @Sendable (_ recordID: String, _ key: String, _ value: String) throws -> Void
     var deleteRecord: @Sendable (_ recordID: String) throws -> Void
     var changeRecordDatabase: @Sendable (_ recordID: String, _ newDatabaseID: String) throws -> Void
+    /// Persist a column-alignment override on a property's `config_json`.
+    /// Pass `nil` to clear and fall back to the type-aware default.
+    var setPropertyAlignment: @Sendable (_ propertyID: String, _ alignment: PropertyAlignment?) throws -> Void
 
     var blocks: @Sendable (_ recordID: String) throws -> [BlockRow]
     var createBlock: @Sendable (_ recordID: String, _ after: String?, _ kind: BlockKind, _ text: AttributedString, _ checked: Bool?) throws -> BlockRow
     var updateBlockText: @Sendable (_ blockID: String, _ text: AttributedString) throws -> Void
     var updateBlockKind: @Sendable (_ blockID: String, _ kind: BlockKind, _ text: AttributedString?) throws -> Void
     var updateBlockChecked: @Sendable (_ blockID: String, _ checked: Bool) throws -> Void
+    var updateBlockTable: @Sendable (_ blockID: String, _ table: BlockTableData) throws -> Void
     var deleteBlock: @Sendable (_ blockID: String) throws -> Void
 
     // Tags
@@ -81,11 +85,13 @@ extension DatabaseClient: DependencyKey {
         updatePropertyValue: { id, key, value in try dbWrite { try DBWrites.updatePropertyValue($0, recordID: id, propertyKey: key, value: value) } },
         deleteRecord:    { id in try dbWrite { try DBWrites.deleteRecord($0, recordID: id) } },
         changeRecordDatabase: { id, newDB in try dbWrite { try DBWrites.changeRecordDatabase($0, recordID: id, newDatabaseID: newDB) } },
+        setPropertyAlignment: { propID, alignment in try dbWrite { try DBWrites.setPropertyAlignment($0, propertyID: propID, alignment: alignment) } },
         blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id) } },
         createBlock:     { rid, after, kind, text, checked in try dbWrite { try DBWrites.createBlock($0, recordID: rid, after: after, kind: kind, text: text, checked: checked) } },
         updateBlockText: { id, text in try dbWrite { try DBWrites.updateBlockText($0, blockID: id, text: text) } },
         updateBlockKind: { id, kind, text in try dbWrite { try DBWrites.updateBlockKind($0, blockID: id, kind: kind, text: text) } },
         updateBlockChecked: { id, checked in try dbWrite { try DBWrites.updateBlockChecked($0, blockID: id, checked: checked) } },
+        updateBlockTable: { id, table in try dbWrite { try DBWrites.updateBlockTable($0, blockID: id, table: table) } },
         deleteBlock:     { id in try dbWrite { try DBWrites.deleteBlock($0, blockID: id) } },
 
         allTags:         { wsID in try dbRead { try TagReads.tags($0, workspaceID: wsID) } },

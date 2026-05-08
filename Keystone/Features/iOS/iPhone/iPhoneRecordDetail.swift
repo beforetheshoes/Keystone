@@ -185,7 +185,19 @@ struct iPhoneRecordDetail: View {
                 iOSCardList {
                     ForEach(nonEmpty, id: \.dbID) { p in
                         let db = store.databases.first(where: { $0.id == p.dbID })
-                        iOSCardRow(
+                        // Compute the route value once — single related
+                        // record opens the detail page directly; multiple
+                        // pushes the database listing.
+                        let route: iPhoneRoute = {
+                            if p.count == 1,
+                               let only = outgoing.first(where: { $0.targetDatabaseID == p.dbID && $0.propertyID == nil }) {
+                                return .record(databaseID: p.dbID, recordID: only.targetRecordID)
+                            } else {
+                                return .database(databaseID: p.dbID)
+                            }
+                        }()
+                        iOSCardLinkRow(
+                            value: route,
                             leading: { Glyph(tone: db?.accent ?? p.tone, text: db?.icon ?? p.glyphFallback, size: 26, radius: 7) },
                             title: p.label,
                             subtitle: nil,
@@ -198,16 +210,7 @@ struct iPhoneRecordDetail: View {
                                     iOSChevron()
                                 }
                             }
-                        ) {
-                            // Push to the related-database listing for now;
-                            // actual filter-by-source comes later.
-                            // (We could push a single-record view if count == 1.)
-                            if p.count == 1, let only = outgoing.first(where: { $0.targetDatabaseID == p.dbID && $0.propertyID == nil }) {
-                                store.send(.setNav(.record(databaseID: p.dbID, recordID: only.targetRecordID)))
-                            } else {
-                                store.send(.setNav(.database(p.dbID)))
-                            }
-                        }
+                        )
                     }
                 }
             }
@@ -223,14 +226,13 @@ struct iPhoneRecordDetail: View {
                 iOSSectionTitle(title: "Linked from")
                 iOSCardList {
                     ForEach(incoming) { link in
-                        iOSCardRow(
+                        iOSCardLinkRow(
+                            value: iPhoneRoute.record(databaseID: link.targetDatabaseID, recordID: link.sourceRecordID),
                             leading: { Glyph(tone: link.targetTone, text: link.targetGlyph, size: 26, radius: 7) },
                             title: link.targetTitle,
                             subtitle: link.targetDatabaseName,
                             trailing: { iOSChevron() }
-                        ) {
-                            store.send(.setNav(.record(databaseID: link.targetDatabaseID, recordID: link.sourceRecordID)))
-                        }
+                        )
                     }
                 }
             }

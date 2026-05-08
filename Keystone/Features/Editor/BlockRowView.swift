@@ -82,8 +82,8 @@ struct BlockRowView: View {
                 onShortcut: handleShortcut
             )
         case .table:
-            if let table = block.tableData {
-                TableBlockBody(table: table)
+            if block.tableData != nil {
+                TableBlockBody(block: block, store: store)
             } else {
                 EmptyView()
             }
@@ -282,52 +282,57 @@ private struct ChecklistBlockBody: View {
     }
 }
 
-/// Read-only table renderer. Lays out cells in a `Grid` with a bold
-/// header row and alternating row backgrounds. Each cell sizes to its
-/// content (no mid-word wrapping); if the table's natural width exceeds
-/// the page, the whole grid scrolls horizontally inside the block.
+/// Editable table renderer. Each cell is a SwiftUI `TextField` bound
+/// to a local mirror of the block's `BlockTableData`; commits flow back
+/// to the store via `.blockTableEdited`. Right-click any cell to
+/// insert/delete rows and columns.
 ///
-/// Why not let cells wrap? SwiftUI's default behavior in a `Grid` will
-/// break long words by character once a column gets squeezed — VINs,
-/// dates, account numbers all end up shattered like "01/16/202\n6".
-/// Sizing cells to natural width and offering horizontal scroll
-/// preserves the data's integrity at the cost of needing a swipe.
-///
-/// To modify a table, regenerate from its `.md` source or convert the
-/// block to a paragraph via the gutter menu.
+/// Cells size to their content (no mid-word wrapping). If the table's
+/// natural width exceeds the page, the whole grid scrolls horizontally
+/// inside the block. Why not wrap? SwiftUI's default behavior in a
+/// `Grid` will break long words by character once a column gets
+/// squeezed — VINs, dates, account numbers all end up shattered like
+/// "01/16/202\n6". A soft per-cell cap (`maxCellWidth`) prevents one
+/// giant cell from blowing up the row width.
 private struct TableBlockBody: View {
-    var table: BlockTableData
+    var block: BlockRow
+    @Bindable var store: StoreOf<AppFeature>
 
-    /// Soft cap on per-cell width so a single absurdly long cell
-    /// doesn't push the whole table off the right edge of the page.
-    /// Beyond this, cells wrap normally (across line breaks, not
-    /// mid-word).
+    /// Local mirror of the block's table so each `TextField` has a
+    /// stable, settable `Binding<String>`. Mirrored from `block` on
+    /// appear and whenever the upstream block changes (CloudKit pull,
+    /// CLI edit, etc.), and pushed back to the store on each commit.
+    @State private var local: BlockTableData = BlockTableData(headers: [], rows: [])
+    @FocusState private var focusedCell: CellCoord?
+
+    /// (-1, n) addresses the header row's nth column.
+    private struct CellCoord: Hashable {
+        let row: Int
+        let column: Int
+    }
+
     private static let maxCellWidth: CGFloat = 320
 
     private var columnCount: Int {
-        let dataMax = table.rows.map(\.count).max() ?? 0
-        return max(table.headers.count, dataMax)
-    }
-
-    private func cell(_ row: [String], _ index: Int) -> String {
-        index < row.count ? row[index] : ""
+        let dataMax = local.rows.map(\.count).max() ?? 0
+        return max(local.headers.count, dataMax)
     }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: true) {
             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                if !table.headers.isEmpty {
+                if !local.headers.isEmpty {
                     GridRow {
                         ForEach(0..<columnCount, id: \.self) { col in
-                            cellView(text: cell(table.headers, col), isHeader: true)
+                            cellView(row: -1, column: col, isHeader: true)
                         }
                     }
                     .background(KstColor.paper2)
                 }
-                ForEach(Array(table.rows.enumerated()), id: \.offset) { rowIndex, row in
+                ForEach(Array(local.rows.enumerated()), id: \.offset) { rowIndex, _ in
                     GridRow {
                         ForEach(0..<columnCount, id: \.self) { col in
-                            cellView(text: cell(row, col), isHeader: false)
+                            cellView(row: rowIndex, column: col, isHeader: false)
                         }
                     }
                     .background(rowIndex.isMultiple(of: 2) ? KstColor.paper0 : KstColor.paper1)
@@ -342,21 +347,30 @@ private struct TableBlockBody: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { local = block.tableData ?? local }
+        .onChange(of: block.tableData) { _, new in
+            // Upstream change while no cell is focused — refresh the
+            // local mirror. Don't clobber an in-progress edit if a cell
+            // still owns focus; the user can re-fetch by clicking out.
+            if focusedCell == nil, let new { local = new }
+        }
     }
 
     @ViewBuilder
-    private func cellView(text: String, isHeader: Bool) -> some View {
-        Text(text)
+    private func cellView(row: Int, column: Int, isHeader: Bool) -> some View {
+        let coord = CellCoord(row: row, column: column)
+        // Single-line `TextField` (no `axis: .vertical`) so the system
+        // handles Tab/Shift+Tab focus traversal natively across cells —
+        // SwiftUI walks the focus chain in source order, which for a
+        // Grid-of-rows-of-cells is left-to-right then top-to-bottom,
+        // exactly what we want. With axis: .vertical, Tab would insert
+        // a literal tab character into the cell content instead.
+        TextField("", text: cellBinding(row: row, column: column))
+            .textFieldStyle(.plain)
             .font(.kstText(size: 13, weight: isHeader ? .semibold : .regular))
             .foregroundStyle(isHeader ? KstColor.ink0 : KstColor.ink1)
-            .multilineTextAlignment(.leading)
-            .lineLimit(nil)
-            // Soft cap on natural width so one giant cell can't blow up
-            // the whole row, but cells of normal length keep their full
-            // width. `fixedSize(horizontal: false, vertical: true)`
-            // tells SwiftUI to use ideal vertical size (allow wrapping
-            // when we hit the cap) but not to compress horizontally
-            // below the natural intrinsic width.
+            .focused($focusedCell, equals: coord)
+            .onSubmit { commit() }
             .frame(maxWidth: Self.maxCellWidth, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10)
@@ -367,6 +381,147 @@ private struct TableBlockBody: View {
             .overlay(alignment: .bottom) {
                 Rectangle().fill(KstColor.ink4).frame(height: 0.5)
             }
+            .contextMenu {
+                Button("Insert row above") { insertRow(at: max(row, 0)); commit() }
+                Button("Insert row below") { insertRow(at: max(row, -1) + 1); commit() }
+                Button("Insert column before") { insertColumn(at: column); commit() }
+                Button("Insert column after") { insertColumn(at: column + 1); commit() }
+                Divider()
+                if local.headers.isEmpty {
+                    if !local.rows.isEmpty {
+                        Button("Promote first row to header") { promoteFirstRowToHeader(); commit() }
+                    }
+                    Button("Add empty header row") { addEmptyHeader(); commit() }
+                } else {
+                    Button("Demote header to row") { demoteHeaderToRow(); commit() }
+                    Button("Remove header row", role: .destructive) { removeHeader(); commit() }
+                }
+                Divider()
+                if row >= 0 {
+                    Button("Delete row", role: .destructive) { deleteRow(at: row); commit() }
+                }
+                Button("Delete column", role: .destructive) { deleteColumn(at: column); commit() }
+            }
+    }
+
+    /// Binding that reads/writes the cell at `(row, column)` from the
+    /// local mirror, where `row == -1` addresses the header. Writes
+    /// don't immediately push to the store — that happens on
+    /// `onSubmit` via `commit()` so a busy edit doesn't fire a write
+    /// per keystroke.
+    private func cellBinding(row: Int, column: Int) -> Binding<String> {
+        Binding(
+            get: {
+                if row < 0 {
+                    return column < local.headers.count ? local.headers[column] : ""
+                }
+                guard row < local.rows.count else { return "" }
+                let r = local.rows[row]
+                return column < r.count ? r[column] : ""
+            },
+            set: { newValue in
+                ensureWidth(at: column)
+                if row < 0 {
+                    while local.headers.count <= column { local.headers.append("") }
+                    local.headers[column] = newValue
+                } else {
+                    while local.rows.count <= row { local.rows.append([]) }
+                    while local.rows[row].count <= column { local.rows[row].append("") }
+                    local.rows[row][column] = newValue
+                }
+            }
+        )
+    }
+
+    /// Pad header + every existing row out to at least `column + 1` so
+    /// writes to a virtual cell at the end of a ragged row materialize
+    /// the missing columns in place.
+    private func ensureWidth(at column: Int) {
+        while local.headers.count <= column { local.headers.append("") }
+        for i in local.rows.indices {
+            while local.rows[i].count <= column { local.rows[i].append("") }
+        }
+    }
+
+    /// Push `local` to the store. Called on every structural op + on
+    /// `onSubmit` of a TextField. The reducer is idempotent for
+    /// no-op updates (it diffs the resulting JSON), so calling more
+    /// often than strictly necessary is fine.
+    private func commit() {
+        store.send(.blockTableEdited(blockID: block.id, table: local))
+    }
+
+    // MARK: - Structural ops
+
+    private func insertRow(at index: Int) {
+        let width = max(columnCount, 1)
+        let blank = Array(repeating: "", count: width)
+        let clamped = max(0, min(index, local.rows.count))
+        local.rows.insert(blank, at: clamped)
+    }
+
+    private func deleteRow(at index: Int) {
+        guard index >= 0, index < local.rows.count else { return }
+        local.rows.remove(at: index)
+    }
+
+    private func insertColumn(at index: Int) {
+        let clamped = max(0, min(index, columnCount))
+        if clamped <= local.headers.count {
+            local.headers.insert("", at: clamped)
+        } else {
+            local.headers.append("")
+        }
+        for i in local.rows.indices {
+            // Pad ragged rows out to the insertion point first so the
+            // new column lands at the right index for every row.
+            while local.rows[i].count < clamped { local.rows[i].append("") }
+            local.rows[i].insert("", at: min(clamped, local.rows[i].count))
+        }
+    }
+
+    private func deleteColumn(at index: Int) {
+        if index < local.headers.count {
+            local.headers.remove(at: index)
+        }
+        for i in local.rows.indices {
+            if index < local.rows[i].count {
+                local.rows[i].remove(at: index)
+            }
+        }
+    }
+
+    // MARK: - Header toggling
+
+    /// Lift `rows[0]` into the header. Useful when the import didn't
+    /// recognize the first row of a CSV-style table as a header.
+    private func promoteFirstRowToHeader() {
+        guard local.headers.isEmpty, let first = local.rows.first else { return }
+        local.headers = first
+        local.rows.removeFirst()
+    }
+
+    /// Push the existing header row down to be the table's first data
+    /// row. Non-destructive opposite of `promoteFirstRowToHeader`.
+    private func demoteHeaderToRow() {
+        guard !local.headers.isEmpty else { return }
+        local.rows.insert(local.headers, at: 0)
+        local.headers = []
+    }
+
+    /// Add a blank header row when the table currently has no header
+    /// at all. Width matches the widest existing data row.
+    private func addEmptyHeader() {
+        guard local.headers.isEmpty else { return }
+        let width = max(columnCount, 1)
+        local.headers = Array(repeating: "", count: width)
+    }
+
+    /// Drop the header row entirely. Destructive — used when the
+    /// header content is junk and the user wants it gone rather than
+    /// preserved as a data row.
+    private func removeHeader() {
+        local.headers = []
     }
 }
 

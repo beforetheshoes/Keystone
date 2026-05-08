@@ -24,3 +24,15 @@ If you want to clear a value, select it and delete the text — empty values bec
 ## Adding properties
 
 You can't add properties to a database from the UI yet. They're defined in the seed data and (future) the database settings. The schema supports it; the UI will follow.
+
+## Looking up vendor info from Apple Maps
+
+Vendors have a built-in helper that fills in phone, website, full address, a compact **City, ST** locality, and category from Apple Maps. On any vendor's detail page, open the `⋯` menu and pick **Look up on Apple Maps**.
+
+- If Apple Maps has a confident match for the vendor's name (and the existing address, when present), you'll see a single **Confident match** card. Click **Apply** to copy the fields onto the record.
+- If Apple Maps returns multiple plausible candidates without a clear winner, the sheet shows them all so you can pick the right one.
+- If nothing matches, the vendor is probably too small or local for MapKit's database — that's normal for private sellers and one-person shops.
+
+Once a vendor is resolved, its detail page shows a **Location** preview tile with a map and an **Open in Maps** button that hands off to the Maps app for directions, hours, photos, and reviews.
+
+The lookup also stores Apple's stable **Place ID** so future re-lookups reuse the exact place even if the business renames or moves.

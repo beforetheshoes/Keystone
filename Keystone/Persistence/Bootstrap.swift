@@ -56,25 +56,56 @@ extension DependencyValues {
             return
         }
 
-        defaultSyncEngine = try SyncEngine(
-            for: writer,
-            tables:
-                Workspace.self,
-                Area.self,
-                ObjectDatabase.self,
-                PropertyDef.self,
-                Record.self,
-                PropertyValueRow.self,
-                Block.self,
-                TagRow.self,
-                RecordTag.self,
-                RelationRow.self,
-                ViewDef.self,
-                AssetRow.self,
-            containerIdentifier: CloudKitConfig.containerIdentifier,
-            logger: Logger(subsystem: "Keystone", category: "CloudKit")
-        )
-        keystoneSyncEngineConfigured = true
+        // NO blanket orphan sweep here. CloudKit syncs rows independently
+        // and out-of-order — a child row commonly arrives before its
+        // parent. A `PRAGMA foreign_key_check` sweep at boot interprets
+        // every freshly-synced row whose parent hasn't landed yet as an
+        // orphan, deletes it, and the SyncEngine's `afterDelete` trigger
+        // then propagates the deletion to CloudKit, wiping the row from
+        // every other device. This is real data loss on multi-device
+        // setups, not just local cleanup.
+        //
+        // Targeted, one-shot orphan removal goes in numbered migrations
+        // (e.g. `removeLegacyDemoOrphansV21`) so it runs once per device
+        // and only against IDs we know are stale.
+
+        // SyncEngine init can throw when the CloudKit container has
+        // FK-violating rows that get applied during the initial pull —
+        // e.g. a `property_values` row referencing a `records.id` that
+        // was hard-deleted on another device. Historically we treated
+        // this as fatal; that strands the user on an unbootable app
+        // with no recovery path. Fall back to local-only mode instead:
+        // the app launches, the user sees their data, and the next boot
+        // (or a manual "reset CloudKit" action) can resolve the
+        // server-side mismatch. Loud log so the user can find this in
+        // Console.app if they wonder why sync is silent.
+        do {
+            defaultSyncEngine = try SyncEngine(
+                for: writer,
+                tables:
+                    Workspace.self,
+                    Area.self,
+                    ObjectDatabase.self,
+                    PropertyDef.self,
+                    Record.self,
+                    PropertyValueRow.self,
+                    Block.self,
+                    TagRow.self,
+                    RecordTag.self,
+                    RelationRow.self,
+                    ViewDef.self,
+                    AssetRow.self,
+                containerIdentifier: CloudKitConfig.containerIdentifier,
+                logger: Logger(subsystem: "Keystone", category: "CloudKit")
+            )
+            keystoneSyncEngineConfigured = true
+        } catch {
+            keystoneSyncEngineConfigured = false
+            bootstrapLog.error(
+                "SyncEngine init failed — running in LOCAL-ONLY mode this session. Error: \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
 
         // Backfill `SyncMetadata` for rows inserted before `SyncEngine`
         // attached its triggers (e.g. seed rows, or any direct

@@ -41,14 +41,24 @@ struct iPhoneDatabaseListView: View {
                 } else {
                     iOSCardList {
                         ForEach(records) { rec in
-                            iOSCardRow(
+                            // `iOSCardLinkRow` wires a `NavigationLink`
+                            // to the enclosing `NavigationStack` (the
+                            // one in `iPhoneHomeView`/`iPhoneSearchView`
+                            // declaring `.navigationDestination(for:
+                            // iPhoneRoute.self)`). Tapping the row
+                            // pushes the record-detail destination
+                            // automatically. The previous code called
+                            // `store.send(.setNav(...))`, which mutates
+                            // TCA state but doesn't append to the
+                            // local `@State path`, so the detail page
+                            // never appeared.
+                            iOSCardLinkRow(
+                                value: iPhoneRoute.record(databaseID: databaseID, recordID: rec.id),
                                 leading: { RecordAvatar(record: rec, size: 30, radius: 8) },
                                 title: rec.title,
                                 subtitle: recordSubtitle(rec),
                                 trailing: { iOSChevron() }
-                            ) {
-                                store.send(.setNav(.record(databaseID: databaseID, recordID: rec.id)))
-                            }
+                            )
                         }
                     }
                 }
@@ -126,14 +136,13 @@ struct iPhoneTagListView: View {
                 } else {
                     iOSCardList {
                         ForEach(rows, id: \.record.id) { item in
-                            iOSCardRow(
+                            iOSCardLinkRow(
+                                value: iPhoneRoute.record(databaseID: item.record.databaseID, recordID: item.record.id),
                                 leading: { RecordAvatar(record: item.record, size: 30, radius: 8) },
                                 title: item.record.title,
                                 subtitle: item.dbName,
                                 trailing: { iOSChevron() }
-                            ) {
-                                store.send(.setNav(.record(databaseID: item.record.databaseID, recordID: item.record.id)))
-                            }
+                            )
                         }
                     }
                 }

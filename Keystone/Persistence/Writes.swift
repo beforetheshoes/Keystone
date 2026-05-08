@@ -152,12 +152,38 @@ enum DBWrites {
                 return obj["targetDatabaseID"] as? String
             }()
 
-            if let targetDB,
-               let targetID = try String.fetchOne(
-                   db,
-                   sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
-                   arguments: [targetDB, trimmed]
-               ) {
+            if let targetDB {
+                // Resolve the target by case-insensitive title; if it
+                // doesn't exist, create a stub record in the target
+                // database. This auto-creation is the right behavior
+                // for structured ingestion (Inbox imports of Vehicle
+                // Maintenance with `vehicle: Civic`, frontmatter from
+                // bulk imports, CLI `set-property` calls). Interactive
+                // editing in the UI uses `RecordPickerPopover` which
+                // never hits this code path, so we don't risk creating
+                // garbage records on every keystroke.
+                let targetID: String
+                if let existing = try String.fetchOne(
+                    db,
+                    sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
+                    arguments: [targetDB, trimmed]
+                ) {
+                    targetID = existing
+                } else if let stub = try createRelationTargetStub(
+                    db, databaseID: targetDB, title: trimmed
+                ) {
+                    targetID = stub
+                } else {
+                    // Target database itself doesn't exist — fall through
+                    // to text fallback so a future schema change might
+                    // resolve it.
+                    try storeAsRelationTextFallback(
+                        db, pvID: pvID, recordID: recordID,
+                        propID: propID, value: trimmed, now: now
+                    )
+                    return
+                }
+
                 let relID = UUID().uuidString
                 try db.execute(
                     sql: """
@@ -173,18 +199,12 @@ enum DBWrites {
                 return
             }
 
-            // Target not found yet — store as text so backfillRelationsByTitle
-            // can promote it later.
-            try db.execute(
-                sql: """
-                    INSERT INTO property_values (id, record_id, property_id, text_value, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                arguments: [pvID, recordID, propID, trimmed, now, now]
-            )
-            try db.execute(
-                sql: "UPDATE records SET updated_at = ? WHERE id = ?",
-                arguments: [now, recordID]
+            // No target database configured — store as text so
+            // backfillRelationsByTitle can promote it later if the
+            // property's config gets fixed.
+            try storeAsRelationTextFallback(
+                db, pvID: pvID, recordID: recordID,
+                propID: propID, value: trimmed, now: now
             )
             return
         }
@@ -222,6 +242,96 @@ enum DBWrites {
         try db.execute(
             sql: "UPDATE records SET updated_at = ? WHERE id = ?",
             arguments: [now, recordID]
+        )
+    }
+
+    /// Create a minimal stub record in `databaseID` titled `title`, used
+    /// when `updatePropertyValue` resolves a relation field to a name
+    /// that has no matching target yet (e.g. importing Vehicle Maintenance
+    /// with `vehicle: Civic` before any Civic record exists). Returns the
+    /// new record's ID, or `nil` if the target database itself doesn't
+    /// exist (caller should fall back to text storage).
+    ///
+    /// The stub has no property values or blocks — just title + glyph +
+    /// tone — so the user can flesh it out later. Sort index goes at the
+    /// end of the target database.
+    private static func createRelationTargetStub(
+        _ db: Database,
+        databaseID: String,
+        title: String
+    ) throws -> String? {
+        // Pull the target database's accent so the new record's tone
+        // matches the rest of the database visually.
+        guard let accent = try String.fetchOne(
+            db,
+            sql: "SELECT accent FROM databases WHERE id = ?",
+            arguments: [databaseID]
+        ) else { return nil }
+
+        let id = UUID().uuidString
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let glyph = makeGlyph(from: title)
+        let nextSort = (try Double.fetchOne(
+            db,
+            sql: "SELECT MAX(sort_index) FROM records WHERE database_id = ?",
+            arguments: [databaseID]
+        ) ?? -1) + 1
+
+        try db.execute(
+            sql: """
+                INSERT INTO records (id, database_id, title, glyph, tone, created_at, updated_at, sort_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [id, databaseID, title, glyph, accent, now, now, nextSort]
+        )
+        return id
+    }
+
+    /// Last-resort: store a relation-field value as plain text in
+    /// `property_values` so a later `backfillRelationsByTitle` pass can
+    /// promote it. Used when the relation property has no
+    /// `targetDatabaseID` configured (recoverable schema misconfiguration).
+    private static func storeAsRelationTextFallback(
+        _ db: Database,
+        pvID: String,
+        recordID: String,
+        propID: String,
+        value: String,
+        now: String
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO property_values (id, record_id, property_id, text_value, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [pvID, recordID, propID, value, now, now]
+        )
+        try db.execute(
+            sql: "UPDATE records SET updated_at = ? WHERE id = ?",
+            arguments: [now, recordID]
+        )
+    }
+
+    /// Persist a column-alignment override on a property's `config_json`.
+    /// Reads the existing config, mutates the alignment, writes back.
+    /// Pass `alignment: nil` to clear the override and fall back to the
+    /// type-aware default in `PropertyRow.resolvedAlignment`.
+    static func setPropertyAlignment(
+        _ db: Database,
+        propertyID: String,
+        alignment: PropertyAlignment?
+    ) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let existing = (try String.fetchOne(
+            db,
+            sql: "SELECT config_json FROM properties WHERE id = ?",
+            arguments: [propertyID]
+        )) ?? "{}"
+        var config = PropertyConfig.parse(existing)
+        config.alignment = alignment
+        try db.execute(
+            sql: "UPDATE properties SET config_json = ?, updated_at = ? WHERE id = ?",
+            arguments: [config.encoded(), now, propertyID]
         )
     }
 
@@ -333,6 +443,70 @@ enum DBWrites {
             created += 1
         }
         return created
+    }
+
+    /// Like `backfillRelationsByTitle`, but auto-creates a stub target
+    /// record when one doesn't exist yet. Use this to clean up a batch
+    /// of imports that landed before the auto-create code in
+    /// `updatePropertyValue` was in place — text-fallback values for
+    /// relation properties get promoted, and any missing target records
+    /// get created on the fly.
+    ///
+    /// Returns `(linksCreated, stubsCreated)`.
+    @discardableResult
+    static func backfillRelationsByTitleWithAutoCreate(_ db: Database) throws -> (Int, Int) {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT pv.id AS pv_id, pv.record_id AS source_id, pv.property_id AS prop_id,
+                   pv.text_value AS title_value, p.config_json AS config
+            FROM property_values pv
+            JOIN properties p ON p.id = pv.property_id
+            WHERE p.type = 'relation' AND pv.text_value IS NOT NULL AND pv.text_value != ''
+        """)
+
+        var linksCreated = 0
+        var stubsCreated = 0
+        for row in rows {
+            let pvID: String = row["pv_id"]
+            let sourceID: String = row["source_id"]
+            let propID: String = row["prop_id"]
+            let title: String = row["title_value"]
+            let configJSON: String = row["config"] ?? "{}"
+
+            guard let data = configJSON.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let targetDB = obj["targetDatabaseID"] as? String else { continue }
+
+            let targetID: String
+            if let existing = try String.fetchOne(
+                db,
+                sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
+                arguments: [targetDB, title]
+            ) {
+                targetID = existing
+            } else if let stub = try createRelationTargetStub(
+                db, databaseID: targetDB, title: title
+            ) {
+                targetID = stub
+                stubsCreated += 1
+            } else {
+                // Target database itself doesn't exist; leave the text
+                // fallback in place for some future caller to handle.
+                continue
+            }
+
+            let relID = UUID().uuidString
+            try db.execute(
+                sql: """
+                    INSERT INTO relations (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                    VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                """,
+                arguments: [relID, sourceID, targetID, propID, now, now]
+            )
+            try db.execute(sql: "DELETE FROM property_values WHERE id = ?", arguments: [pvID])
+            linksCreated += 1
+        }
+        return (linksCreated, stubsCreated)
     }
 
     /// Move a record from one database to another. Property values whose
@@ -561,6 +735,19 @@ enum DBWrites {
                 arguments: [kind.rawValue, now, blockID]
             )
         }
+    }
+
+    /// Replace a `.table` block's tabular payload. The block's `text`
+    /// and `checked` fields aren't used by tables, so we don't bother
+    /// preserving them — `encodeTable` always writes a fresh content
+    /// blob with only `tableData`.
+    static func updateBlockTable(_ db: Database, blockID: String, table: BlockTableData) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let json = BlockContentCodec.encodeTable(table)
+        try db.execute(
+            sql: "UPDATE blocks SET content_json = ?, updated_at = ? WHERE id = ?",
+            arguments: [json, now, blockID]
+        )
     }
 
     static func updateBlockChecked(_ db: Database, blockID: String, checked: Bool) throws {

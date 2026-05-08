@@ -10,6 +10,7 @@ struct RecordDetailView: View {
     @State private var valueDrafts: [String: String] = [:]
     @State private var titleDraftDirty: Bool = false
     @State private var dirtyKeys: Set<String> = []
+    @State private var lookupSheetOpen: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,6 +23,12 @@ struct RecordDetailView: View {
                     Text("Back")
                 }
                 Menu {
+                    if db.id == "vendors" {
+                        Button("Look up on Apple Maps") {
+                            lookupSheetOpen = true
+                        }
+                        Divider()
+                    }
                     Button("Delete record", role: .destructive) {
                         store.send(.deleteCurrentRecord)
                     }
@@ -61,6 +68,16 @@ struct RecordDetailView: View {
                     // Tags
                     TagChipRow(store: store)
                         .padding(.bottom, 24)
+
+                    #if canImport(MapKit)
+                    if #available(iOS 26.0, macOS 26.0, *),
+                       db.id == "vendors",
+                       let placeID = record.values["place_id"], !placeID.isEmpty {
+                        SectionHeader(title: "LOCATION", count: nil)
+                        VendorMapPreview(placeID: placeID)
+                            .padding(.bottom, 28)
+                    }
+                    #endif
 
                     if !relatedNonProperty.isEmpty {
                         SectionHeader(title: "RELATED", count: nil)
@@ -106,6 +123,18 @@ struct RecordDetailView: View {
             }
         }
         .onDisappear { flushAllDrafts(forRecordID: record.id) }
+        #if canImport(MapKit)
+        .sheet(isPresented: $lookupSheetOpen) {
+            if #available(iOS 26.0, macOS 26.0, *) {
+                VendorLookupSheet(
+                    store: store,
+                    recordID: record.id,
+                    currentName: record.title,
+                    currentAddress: record.values["address"]
+                )
+            }
+        }
+        #endif
     }
 
     private func syncDrafts() {
