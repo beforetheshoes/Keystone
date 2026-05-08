@@ -2,14 +2,24 @@ import SwiftUI
 
 struct ViewSwitcher: View {
     var selected: ViewKind
+    /// Show the Calendar item. Off by default so existing call sites
+    /// compile unchanged; `DatabaseDetailView` flips it on for databases
+    /// that have at least one date / date_tz property.
+    var showsCalendar: Bool = false
     var setView: (ViewKind) -> Void
 
-    private let items: [(kind: ViewKind, label: String, system: String)] = [
-        (.table,     "Table",     "tablecells"),
-        (.gallery,   "Gallery",   "rectangle.grid.2x2"),
-        (.list,      "List",      "list.bullet"),
-        (.dashboard, "Dashboard", "rectangle.split.3x1"),
-    ]
+    private var items: [(kind: ViewKind, label: String, system: String)] {
+        var base: [(kind: ViewKind, label: String, system: String)] = [
+            (.table,     "Table",     "tablecells"),
+            (.gallery,   "Gallery",   "rectangle.grid.2x2"),
+            (.list,      "List",      "list.bullet"),
+            (.dashboard, "Dashboard", "rectangle.split.3x1"),
+        ]
+        if showsCalendar {
+            base.append((.calendar, "Calendar", "calendar"))
+        }
+        return base
+    }
 
     var body: some View {
         HStack(spacing: 1) {

@@ -385,7 +385,16 @@ struct AppFeature {
                 state.currentProperties = props
                 state.currentRecords = records
                 if let db {
-                    state.viewKind = db.defaultView
+                    // Calendar requires a date / date_tz property to plot
+                    // against. Fall back to table when the database
+                    // doesn't have one — avoids landing on a "View not
+                    // available" screen.
+                    let hasDateProp = props.contains { $0.type == .date || $0.type == .dateTZ }
+                    if db.defaultView == .calendar && !hasDateProp {
+                        state.viewKind = .table
+                    } else {
+                        state.viewKind = db.defaultView
+                    }
                 }
                 return .none
 

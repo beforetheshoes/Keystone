@@ -22,6 +22,7 @@ When changing or adding a feature in any of these areas, **also update the match
 | Inbox folder              | [16-inbox.md](Keystone/Resources/Help/16-inbox.md)                   |
 | Travel area / templates   | [17-travel.md](Keystone/Resources/Help/17-travel.md)                 |
 | Enrichment & API keys     | [18-enrichment.md](Keystone/Resources/Help/18-enrichment.md)         |
+| Calendar view             | [19-calendar.md](Keystone/Resources/Help/19-calendar.md)             |
 
 ## Process
 
