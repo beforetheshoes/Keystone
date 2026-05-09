@@ -63,6 +63,12 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSHumanReadableCopyright: ""
         ITSAppUsesNonExemptEncryption: false
+        # Required when calling LocalAuthentication's biometric policies
+        # on devices that have Face ID. Touch ID / password fallback don't
+        # require a usage description, but Face ID does — without this
+        # key, the system silently rejects the auth request on Face ID
+        # hardware.
+        NSFaceIDUsageDescription: Keystone uses Face ID to unlock the app and protected records.
         UILaunchScreen:
           UIColorName: LaunchBackground
         UISupportedInterfaceOrientations:
@@ -165,6 +171,12 @@ targets:
         product: Dependencies
       - package: GRDB
         product: GRDB
+      # AppLockFlowTests uses TestStore's `\.actionCase` keypath
+      # syntax which resolves to CasePathsCore types — must be
+      # linked into the test bundle explicitly even though it's
+      # transitive via TCA.
+      - package: swift-composable-architecture
+        product: CasePaths
 
 schemes:
   Keystone:

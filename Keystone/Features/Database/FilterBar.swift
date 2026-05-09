@@ -363,7 +363,9 @@ private struct RelationFilterEditor: View {
         // if the property's config doesn't carry `targetDatabaseID`
         // (shouldn't happen for valid relation properties).
         guard let targetDB = try? db.relationTargetDatabaseID(property.id) ?? nil else { return }
-        let records = (try? db.records(targetDB)) ?? []
+        // Pass the privacy hidden set so a relation-equality filter
+        // doesn't surface protected records as picker candidates.
+        let records = (try? db.records(targetDB, store.hiddenRecordIDs)) ?? []
         candidates = records.map { ($0.id, $0.title) }.sorted { $0.title < $1.title }
     }
 }

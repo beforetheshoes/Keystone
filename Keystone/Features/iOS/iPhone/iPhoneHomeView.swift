@@ -37,14 +37,18 @@ struct iPhoneHomeView: View {
         .onChange(of: store.databases) { _, _ in
             Task { await reload() }
         }
+        .onChange(of: store.hiddenRecordIDs) { _, _ in
+            Task { await reload() }
+        }
     }
 
     private func reload() async {
-        people = (try? dbClient.records("people")) ?? []
-        pets = (try? dbClient.records("pets")) ?? []
-        vehicles = (try? dbClient.records("vehicles")) ?? []
-        documents = (try? dbClient.records("documents")) ?? []
-        events = (try? dbClient.records("events")) ?? []
+        let hidden = store.hiddenRecordIDs
+        people = (try? dbClient.records("people", hidden)) ?? []
+        pets = (try? dbClient.records("pets", hidden)) ?? []
+        vehicles = (try? dbClient.records("vehicles", hidden)) ?? []
+        documents = (try? dbClient.records("documents", hidden)) ?? []
+        events = (try? dbClient.records("events", hidden)) ?? []
     }
 
     private var header: some View {

@@ -67,11 +67,15 @@ enum TagReads {
     }
 
     /// Records (with database name) that have a given tag, across the workspace.
-    static func recordsForTag(_ db: Database, tagID: String) throws -> [(record: RecordRow, dbName: String)] {
+    static func recordsForTag(
+        _ db: Database,
+        tagID: String,
+        excluding: Set<String> = []
+    ) throws -> [(record: RecordRow, dbName: String)] {
         let recIDs = try recordIDsForTag(db, tagID: tagID)
         guard !recIDs.isEmpty else { return [] }
         var out: [(RecordRow, String)] = []
-        for id in recIDs {
+        for id in recIDs where !excluding.contains(id) {
             if let rec = try DBReads.record(db, id: id),
                let row = try Row.fetchOne(db, sql: "SELECT name FROM databases WHERE id = ?", arguments: [rec.databaseID]) {
                 out.append((rec, row["name"]))

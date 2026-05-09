@@ -71,6 +71,43 @@ struct AppFeature {
         /// carries the database id + display name for the picker. Reset
         /// to nil on close, on candidate pick, or on database/nav change.
         var lookupSheet: LookupSheetState?
+
+        // MARK: - Privacy lock
+
+        /// True when the app-launch lock has been satisfied (or is
+        /// disabled). When false, `AppView` overlays `AppLockView` and
+        /// blocks the underlying UI.
+        ///
+        /// On bootstrap we set this to `false` if
+        /// `KeystoneSettings.appLockEnabled` is on, then run the
+        /// biometric prompt. Defaults to `true` so workspaces with the
+        /// lock disabled (the common case) never see a prompt.
+        var appLockUnlocked: Bool = true
+
+        /// In-memory allow-list of records the user has already
+        /// authenticated for during this session. Never persisted —
+        /// quitting the app clears it. Includes both individually-
+        /// unlocked records (per-record prompt) and the full set after
+        /// "Show all protected" has been used.
+        var unlockedRecordIDs: Set<String> = []
+
+        /// Cached output of `ProtectedReads.hiddenRecordIDs` —
+        /// recomputed on bootstrap, on every protection toggle, on
+        /// relation create/delete (cascade depends on relations), and
+        /// after each unlock/lock action.
+        var hiddenRecordIDs: Set<String> = []
+
+        /// Cached output of `ProtectedReads.allProtectedSeedIDs` —
+        /// the literal set of records flagged `is_protected = true`.
+        /// Used by the "N protected hidden" footer, the "Show all
+        /// protected" affordance, and the lock-now button's enabled
+        /// state. Recomputed alongside `hiddenRecordIDs`.
+        var protectedSeedIDs: Set<String> = []
+
+        /// True when an auth challenge is currently in flight.
+        /// Suppresses duplicate prompts if the user double-taps the
+        /// unlock button. Cleared on completion / cancel.
+        var authInFlight: Bool = false
     }
 
     struct LookupSheetState: Equatable {
@@ -260,10 +297,43 @@ struct AppFeature {
         case setCoverImage(recordID: String, fileURL: URL)
         case clearCoverImage(recordID: String)
         case coverImageChanged(recordID: String)
+
+        // Privacy lock
+        /// Recompute `hiddenRecordIDs` + `protectedSeedIDs` from the
+        /// current DB + unlock allow-list. Fired on bootstrap and after
+        /// any write that could change cascade membership (is_protected
+        /// toggle, relation create/delete).
+        case recomputeHiddenSet
+        case hiddenSetLoaded(hidden: Set<String>, seeds: Set<String>)
+        /// User pressed the lock-screen authenticate button (or app
+        /// just bootstrapped with `appLockEnabled` on).
+        case unlockAppRequested
+        /// User-facing "Lock now" — clears `unlockedRecordIDs` and
+        /// re-engages the launch lock when enabled. Independent of OS
+        /// session lifecycle.
+        case lockAppRequested
+        /// User tapped the per-record auth prompt.
+        case unlockRecordRequested(recordID: String)
+        /// User tapped the "N protected — Show" footer / "Show all
+        /// protected" toolbar button.
+        case unlockAllProtectedRequested
+        /// Internal — auth finished. `success=true` flips the relevant
+        /// state slot; `false` only clears `authInFlight`.
+        case authCompleted(scope: AuthScope, success: Bool)
+    }
+
+    /// Distinguishes which auth challenge a result is responding to,
+    /// so a single `.authCompleted` action can route to the correct
+    /// state mutation.
+    enum AuthScope: Equatable, Sendable {
+        case appLaunch
+        case singleRecord(id: String)
+        case allProtected
     }
 
     @Dependency(\.databaseClient) var dbClient
     @Dependency(\.syncEngineClient) var syncClient
+    @Dependency(\.biometricAuthClient) var authClient
 
     /// True when the prior status was already a settled sync state. Used
     /// to gate the sidebar refresh on `.synced` so we only do work on the
@@ -283,14 +353,30 @@ struct AppFeature {
             case .task:
                 guard !state.bootstrapped else { return .none }
                 state.bootstrapped = true
+                // Decide initial lock state immediately so the AppView
+                // overlay decision doesn't flicker on launch. The actual
+                // biometric prompt fires from .unlockAppRequested below
+                // once the hidden-set has been computed.
+                let appLockEnabled = KeystoneSettings.appLockEnabled
+                state.appLockUnlocked = !appLockEnabled
                 return .merge(
                     .run { send in
+                        // Hidden set must load BEFORE the area/database
+                        // fetch result reaches the UI, otherwise the
+                        // sidebar/palette flash protected items for one
+                        // tick. Computing it first keeps that gap shut.
+                        await send(.recomputeHiddenSet)
                         let areas = (try? dbClient.areas()) ?? []
                         let dbs   = (try? dbClient.databases()) ?? []
-                        let pal   = (try? dbClient.paletteItems()) ?? []
+                        let pal   = (try? dbClient.paletteItems([])) ?? []
                         let tags  = (try? dbClient.allTags(Seed.workspaceID)) ?? []
                         await send(.bootstrapLoaded(areas: areas, databases: dbs, palette: pal))
                         await send(.allTagsLoaded(tags))
+                        // If the user enabled app lock, kick the prompt
+                        // now. The AppView overlay is already on screen.
+                        if appLockEnabled {
+                            await send(.unlockAppRequested)
+                        }
                     },
                     .run { send in
                         // Kick off CloudKit sync if it's been configured.
@@ -392,10 +478,11 @@ struct AppFeature {
                     state.currentRecord = nil
                     state.currentRecordRelated = []
                     state.currentBlocks = []
+                    let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let db = try? dbClient.database(dbID)
                         let props = (try? dbClient.properties(dbID)) ?? []
-                        let records = (try? dbClient.records(dbID)) ?? []
+                        let records = (try? dbClient.records(dbID, hidden)) ?? []
                         await send(.databaseLoaded(db: db, properties: props, records: records))
                     }
                 case let .record(databaseID, recordID):
@@ -404,13 +491,14 @@ struct AppFeature {
                     state.currentOutgoingRelations = []
                     state.currentIncomingRelations = []
                     state.currentRecordAssets = []
+                    let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let rec = try? dbClient.record(recordID)
-                        let related = (try? dbClient.relatedRecords(recordID)) ?? []
+                        let related = (try? dbClient.relatedRecords(recordID, hidden)) ?? []
                         let blocks = (try? dbClient.blocks(recordID)) ?? []
                         let tags = (try? dbClient.tagsForRecord(recordID)) ?? []
-                        let outgoing = (try? dbClient.outgoingRelations(recordID)) ?? []
-                        let incoming = (try? dbClient.incomingRelations(recordID)) ?? []
+                        let outgoing = (try? dbClient.outgoingRelations(recordID, hidden)) ?? []
+                        let incoming = (try? dbClient.incomingRelations(recordID, hidden)) ?? []
                         let assets = (try? dbClient.assetsForRecord(recordID)) ?? []
                         if let db = try? dbClient.database(databaseID) {
                             let props = (try? dbClient.properties(databaseID)) ?? []
@@ -433,9 +521,10 @@ struct AppFeature {
                     state.currentOutgoingRelations = []
                     state.currentIncomingRelations = []
                     let knownTag = state.allTags.first(where: { $0.id == tagID })
+                    let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let tag = knownTag ?? (try? dbClient.allTags(Seed.workspaceID))?.first(where: { $0.id == tagID })
-                        let pairs = (try? dbClient.recordsForTag(tagID)) ?? []
+                        let pairs = (try? dbClient.recordsForTag(tagID, hidden)) ?? []
                         let mapped = pairs.map { TaggedRecord(record: $0.record, databaseName: $0.dbName) }
                         await send(.tagFilterLoaded(tag: tag, records: mapped))
                     }
@@ -751,9 +840,22 @@ struct AppFeature {
                         state.currentRecords[idx].values[key] = value
                     }
                 }
-                return .run { _ in
-                    try? dbClient.updatePropertyValue(recordID, key, value)
-                }
+                // is_protected toggles change the cascade — recompute
+                // the hidden set so the UI hides/reveals dependents in
+                // the same tick. For relation properties, the write
+                // path itself emits a relations row; recompute too so
+                // newly-attached children fall under cascade
+                // immediately when their parent is protected.
+                let touchedProtection = (key == "is_protected")
+                let touchedRelation = state.currentProperties
+                    .first(where: { $0.key == key })?.type == .relation
+                let recompute: Effect<Action> = (touchedProtection || touchedRelation)
+                    ? .send(.recomputeHiddenSet)
+                    : .none
+                return .merge(
+                    .run { _ in try? dbClient.updatePropertyValue(recordID, key, value) },
+                    recompute
+                )
 
             case let .changeRecordDatabase(recordID, newDatabaseID):
                 guard state.currentRecord?.id == recordID,
@@ -793,9 +895,10 @@ struct AppFeature {
                 }
 
             case .refreshSidebar:
+                let hidden = state.hiddenRecordIDs
                 return .run { send in
                     let dbs = (try? dbClient.databases()) ?? []
-                    let pal = (try? dbClient.paletteItems()) ?? []
+                    let pal = (try? dbClient.paletteItems(hidden)) ?? []
                     await send(.sidebarRefreshed(databases: dbs, palette: pal))
                 }
 
@@ -806,8 +909,9 @@ struct AppFeature {
 
             case .refreshCurrentRecords:
                 if case let .database(dbID) = state.nav {
+                    let hidden = state.hiddenRecordIDs
                     return .run { send in
-                        let recs = (try? dbClient.records(dbID)) ?? []
+                        let recs = (try? dbClient.records(dbID, hidden)) ?? []
                         let db = try? dbClient.database(dbID)
                         let props = (try? dbClient.properties(dbID)) ?? []
                         await send(.databaseLoaded(db: db, properties: props, records: recs))
@@ -989,22 +1093,30 @@ struct AppFeature {
 
             case let .addRelation(propertyID, targetRecordID):
                 guard let sourceID = state.currentRecord?.id else { return .none }
-                return .run { send in
-                    _ = try? dbClient.addRelation(sourceID, targetRecordID, propertyID)
-                    let outgoing = (try? dbClient.outgoingRelations(sourceID)) ?? []
-                    let incoming = (try? dbClient.incomingRelations(sourceID)) ?? []
-                    await send(.relationsLoaded(outgoing: outgoing, incoming: incoming))
-                }
+                let hidden = state.hiddenRecordIDs
+                return .merge(
+                    .send(.recomputeHiddenSet),
+                    .run { send in
+                        _ = try? dbClient.addRelation(sourceID, targetRecordID, propertyID)
+                        let outgoing = (try? dbClient.outgoingRelations(sourceID, hidden)) ?? []
+                        let incoming = (try? dbClient.incomingRelations(sourceID, hidden)) ?? []
+                        await send(.relationsLoaded(outgoing: outgoing, incoming: incoming))
+                    }
+                )
 
             case let .removeRelation(relationID):
                 guard let sourceID = state.currentRecord?.id else { return .none }
                 state.currentOutgoingRelations.removeAll { $0.id == relationID }
-                return .run { send in
-                    try? dbClient.removeRelation(relationID)
-                    let outgoing = (try? dbClient.outgoingRelations(sourceID)) ?? []
-                    let incoming = (try? dbClient.incomingRelations(sourceID)) ?? []
-                    await send(.relationsLoaded(outgoing: outgoing, incoming: incoming))
-                }
+                let hidden = state.hiddenRecordIDs
+                return .merge(
+                    .send(.recomputeHiddenSet),
+                    .run { send in
+                        try? dbClient.removeRelation(relationID)
+                        let outgoing = (try? dbClient.outgoingRelations(sourceID, hidden)) ?? []
+                        let incoming = (try? dbClient.incomingRelations(sourceID, hidden)) ?? []
+                        await send(.relationsLoaded(outgoing: outgoing, incoming: incoming))
+                    }
+                )
 
             case let .syncStatusChanged(status):
                 let prior = state.syncStatus
@@ -1101,16 +1213,94 @@ struct AppFeature {
                 }
 
             case let .coverImageChanged(recordID):
+                let hidden = state.hiddenRecordIDs
                 return .merge(
                     .send(.refreshCurrentRecords),
                     .run { send in
                         let rec = try? dbClient.record(recordID)
-                        let related = (try? dbClient.relatedRecords(recordID)) ?? []
+                        let related = (try? dbClient.relatedRecords(recordID, hidden)) ?? []
                         await send(.recordLoaded(record: rec, related: related))
                         let assets = (try? dbClient.assetsForRecord(recordID)) ?? []
                         await send(.assetsLoaded(assets))
                     }
                 )
+
+            // MARK: - Privacy lock
+
+            case .recomputeHiddenSet:
+                let unlocked = state.unlockedRecordIDs
+                let active = KeystoneSettings.protectionFilteringActive
+                return .run { send in
+                    let hidden = (try? dbClient.protectedHiddenIDs(unlocked, active)) ?? []
+                    let seeds = (try? dbClient.allProtectedSeedIDs()) ?? []
+                    await send(.hiddenSetLoaded(hidden: hidden, seeds: seeds))
+                }
+
+            case let .hiddenSetLoaded(hidden, seeds):
+                let oldHidden = state.hiddenRecordIDs
+                state.hiddenRecordIDs = hidden
+                state.protectedSeedIDs = seeds
+                // Drop any in-memory record snapshot that just became
+                // hidden — otherwise the detail view keeps showing it
+                // until the user navigates away.
+                state.currentRecords.removeAll { hidden.contains($0.id) }
+                state.currentRecordRelated.removeAll { hidden.contains($0.id) }
+                state.currentOutgoingRelations.removeAll { hidden.contains($0.targetRecordID) }
+                state.currentIncomingRelations.removeAll { hidden.contains($0.sourceRecordID) }
+                if let curr = state.currentRecord, hidden.contains(curr.id) {
+                    state.currentRecord = nil
+                }
+                // If the hidden set actually changed and we're sitting
+                // on a database, refresh that view so newly-revealed
+                // records reappear (or newly-hidden ones drop out).
+                if oldHidden != hidden, case .database = state.nav {
+                    return .send(.refreshCurrentRecords)
+                }
+                return .none
+
+            case .unlockAppRequested:
+                guard !state.authInFlight else { return .none }
+                state.authInFlight = true
+                return .run { send in
+                    let ok = await authClient.authenticate("Unlock Keystone")
+                    await send(.authCompleted(scope: .appLaunch, success: ok))
+                }
+
+            case .lockAppRequested:
+                state.unlockedRecordIDs = []
+                state.appLockUnlocked = !KeystoneSettings.appLockEnabled
+                return .send(.recomputeHiddenSet)
+
+            case let .unlockRecordRequested(recordID):
+                guard !state.authInFlight else { return .none }
+                state.authInFlight = true
+                return .run { send in
+                    let ok = await authClient.authenticate("Unlock this record")
+                    await send(.authCompleted(scope: .singleRecord(id: recordID), success: ok))
+                }
+
+            case .unlockAllProtectedRequested:
+                guard !state.authInFlight else { return .none }
+                state.authInFlight = true
+                return .run { send in
+                    let ok = await authClient.authenticate("Show all protected records")
+                    await send(.authCompleted(scope: .allProtected, success: ok))
+                }
+
+            case let .authCompleted(scope, success):
+                state.authInFlight = false
+                guard success else { return .none }
+                switch scope {
+                case .appLaunch:
+                    state.appLockUnlocked = true
+                    return .none
+                case let .singleRecord(id):
+                    state.unlockedRecordIDs.insert(id)
+                    return .send(.recomputeHiddenSet)
+                case .allProtected:
+                    state.unlockedRecordIDs.formUnion(state.protectedSeedIDs)
+                    return .send(.recomputeHiddenSet)
+                }
             }
         }
     }

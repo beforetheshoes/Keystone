@@ -79,12 +79,15 @@ struct iPhoneDatabaseListView: View {
         }
         .task(id: databaseID) {
             dbRow = try? dbClient.database(databaseID)
-            records = (try? dbClient.records(databaseID)) ?? []
+            records = (try? dbClient.records(databaseID, store.hiddenRecordIDs)) ?? []
         }
         .onChange(of: store.currentRecords) { _, new in
             if case .database(let id) = store.nav, id == databaseID {
                 records = new
             }
+        }
+        .onChange(of: store.hiddenRecordIDs) { _, _ in
+            records = (try? dbClient.records(databaseID, store.hiddenRecordIDs)) ?? []
         }
     }
 
@@ -154,7 +157,10 @@ struct iPhoneTagListView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: tagID) {
             tag = (try? dbClient.allTags(Seed.workspaceID))?.first { $0.id == tagID }
-            rows = (try? dbClient.recordsForTag(tagID)) ?? []
+            rows = (try? dbClient.recordsForTag(tagID, store.hiddenRecordIDs)) ?? []
+        }
+        .onChange(of: store.hiddenRecordIDs) { _, _ in
+            rows = (try? dbClient.recordsForTag(tagID, store.hiddenRecordIDs)) ?? []
         }
     }
 }

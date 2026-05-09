@@ -25,6 +25,7 @@ When changing or adding a feature in any of these areas, **also update the match
 | Calendar view             | [19-calendar.md](Keystone/Resources/Help/19-calendar.md)             |
 | Collections (media)       | [20-collections.md](Keystone/Resources/Help/20-collections.md)       |
 | Maintenance scheduling    | [21-maintenance-scheduling.md](Keystone/Resources/Help/21-maintenance-scheduling.md) |
+| Privacy / app lock        | [22-privacy-lock.md](Keystone/Resources/Help/22-privacy-lock.md)     |
 
 ## Process
 

@@ -77,7 +77,10 @@ struct TripDetailAugmentation: View {
     }
 
     private func fetchChildren(tripID: String) throws -> TripChildren {
-        let links = try databaseClient.incomingRelations(tripID)
+        // Pass `hiddenRecordIDs` so a child that's individually
+        // privacy-locked (rare — children inherit the parent's lock via
+        // cascade) doesn't leak through the timeline / calendar / map.
+        let links = try databaseClient.incomingRelations(tripID, store.hiddenRecordIDs)
         var activities: [RecordRow] = []
         var lodging: [RecordRow] = []
         var transportation: [RecordRow] = []

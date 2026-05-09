@@ -24,7 +24,12 @@ enum RelationReads {
     /// device — the dedupe boot pass cleans this up at startup, but a
     /// real-time sync push during the session can briefly produce
     /// duplicates that the UI shouldn't render twice.
-    static func outgoing(_ db: Database, recordID: String, propertyID: String? = nil) throws -> [RelationLink] {
+    static func outgoing(
+        _ db: Database,
+        recordID: String,
+        propertyID: String? = nil,
+        excluding: Set<String> = []
+    ) throws -> [RelationLink] {
         let sql: String
         let args: StatementArguments
         if let propertyID {
@@ -62,11 +67,20 @@ enum RelationReads {
             args = [recordID]
         }
         let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-        return rows.map(rowToLink)
+        let mapped = rows.map(rowToLink)
+        if excluding.isEmpty { return mapped }
+        // Filter target side — when the record this relation points at is
+        // privacy-locked, we don't want it leaking through the outgoing-
+        // relation list on the source's detail page.
+        return mapped.filter { !excluding.contains($0.targetRecordID) }
     }
 
     /// Incoming relations TO `recordID` (records that link here).
-    static func incoming(_ db: Database, recordID: String) throws -> [RelationLink] {
+    static func incoming(
+        _ db: Database,
+        recordID: String,
+        excluding: Set<String> = []
+    ) throws -> [RelationLink] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT r.id AS relID, r.source_record_id, r.target_record_id, r.property_id,
                    p.name AS prop_name,
@@ -80,7 +94,7 @@ enum RelationReads {
             ORDER BY d.sort_index, s.title COLLATE NOCASE
         """, arguments: [recordID])
         // For incoming, target_* fields actually carry source data — flip semantics:
-        return rows.map { row in
+        let mapped = rows.map { row in
             RelationLink(
                 id: row["relID"],
                 sourceRecordID: row["source_record_id"],
@@ -94,6 +108,9 @@ enum RelationReads {
                 targetDatabaseName: row["db_name"]
             )
         }
+        if excluding.isEmpty { return mapped }
+        // Filter source side — same reasoning as outgoing, mirror direction.
+        return mapped.filter { !excluding.contains($0.sourceRecordID) }
     }
 
     static func link(_ db: Database, relationID: String) throws -> RelationLink? {

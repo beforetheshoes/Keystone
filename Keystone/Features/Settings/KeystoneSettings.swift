@@ -47,6 +47,44 @@ enum KeystoneSettings {
         UserDefaults.standard.bool(forKey: openInDetailAfterAddKey)
     }
 
+    // MARK: - Privacy
+
+    /// When true, Keystone shows a biometric lock screen on launch (and
+    /// after a manual "Lock now") that blocks the workspace until the
+    /// user authenticates. Independent of per-record protection — see
+    /// `protectedRecordsHiddenWhenAppLockOff` for the policy that
+    /// governs whether protected records are filtered while app lock
+    /// itself is off. Default `false`; toggle in Settings → Privacy.
+    static let appLockEnabledKey = "appLockEnabled"
+
+    static var appLockEnabled: Bool {
+        UserDefaults.standard.bool(forKey: appLockEnabledKey)
+    }
+
+    /// When true (default), records flagged `is_protected = true` are
+    /// hidden from every UI surface even when app-launch lock is OFF.
+    /// Lets a user use per-record protection without forcing biometrics
+    /// on launch. When false AND `appLockEnabled` is false, protection
+    /// becomes a no-op — the property is preserved but no filtering
+    /// happens.
+    static let protectedRecordsHiddenWhenAppLockOffKey = "protectedRecordsHiddenWhenAppLockOff"
+
+    static var protectedRecordsHiddenWhenAppLockOff: Bool {
+        // Default true — explicit registration so a user who has never
+        // touched the toggle still gets the protective behavior.
+        if UserDefaults.standard.object(forKey: protectedRecordsHiddenWhenAppLockOffKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: protectedRecordsHiddenWhenAppLockOffKey)
+    }
+
+    /// True when protected records should currently be filtered from UI:
+    /// either because app lock is on (so we always filter when locked),
+    /// or because the user opted in to filtering even with app lock off.
+    static var protectionFilteringActive: Bool {
+        appLockEnabled || protectedRecordsHiddenWhenAppLockOff
+    }
+
     // MARK: - Recent time zones
 
     static let recentTimeZonesKey = "kst.recentTimeZones"

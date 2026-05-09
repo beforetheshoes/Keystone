@@ -83,6 +83,10 @@ struct KeystoneApp: App {
                     .keyboardShortcut("k", modifiers: .command)
                 Button("Quick Capture") { store.send(.openCapture) }
                     .keyboardShortcut("n", modifiers: .command)
+                Divider()
+                Button("Lock Now") { store.send(.lockAppRequested) }
+                    .keyboardShortcut("l", modifiers: [.command, .control])
+                    .disabled(!KeystoneSettings.appLockEnabled && store.unlockedRecordIDs.isEmpty)
             }
             CommandGroup(replacing: .help) {
                 Button("Keystone Help") {

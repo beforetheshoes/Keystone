@@ -24,6 +24,8 @@
 	<false/>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Keystone uses Face ID to unlock the app and protected records.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>NSUbiquitousContainers</key>

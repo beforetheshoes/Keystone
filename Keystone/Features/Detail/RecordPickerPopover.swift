@@ -5,6 +5,12 @@ import Dependencies
 struct RecordPickerPopover: View {
     var targetDatabaseID: String
     var excludingRecordIDs: Set<String> = []
+    /// Privacy-lock hidden set; passed straight to `dbClient.records` so
+    /// protected records never appear in the relation picker. Defaults
+    /// to empty so callers that haven't been threaded through the lock
+    /// state still compile (and silently fail open — preferable for a
+    /// picker that shouldn't crash on missing context).
+    var hiddenRecordIDs: Set<String> = []
     var onPick: (RecordRow) -> Void
 
     @State private var query: String = ""
@@ -58,7 +64,7 @@ struct RecordPickerPopover: View {
         .background(KstColor.paper0)
         .onAppear {
             focused = true
-            records = (try? dbClient.records(targetDatabaseID)) ?? []
+            records = (try? dbClient.records(targetDatabaseID, hiddenRecordIDs)) ?? []
         }
     }
 

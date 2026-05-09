@@ -227,8 +227,17 @@ enum DBReads {
         }
     }
 
-    static func records(_ db: Database, databaseID: String) throws -> [RecordRow] {
-        let recRows = try Row.fetchAll(db, sql: """
+    /// Fetch every visible record in `databaseID`, soft-deletes excluded.
+    /// `excluding` is the privacy-lock hidden set from
+    /// `AppFeature.State.hiddenRecordIDs` — protected records (and any
+    /// dependents in the cascade) are filtered out at the SQL level so
+    /// downstream UI surfaces never see them.
+    static func records(
+        _ db: Database,
+        databaseID: String,
+        excluding: Set<String> = []
+    ) throws -> [RecordRow] {
+        let recRowsRaw = try Row.fetchAll(db, sql: """
             SELECT r.id, r.database_id, r.title, r.glyph, r.tone, r.sort_index,
                    r.cover_asset_id, a.relative_path AS cover_relative_path
             FROM records r
@@ -236,6 +245,13 @@ enum DBReads {
             WHERE r.database_id = ? AND r.deleted_at IS NULL
             ORDER BY r.sort_index
         """, arguments: [databaseID])
+
+        let recRows: [Row]
+        if excluding.isEmpty {
+            recRows = recRowsRaw
+        } else {
+            recRows = recRowsRaw.filter { !excluding.contains($0["id"] as String) }
+        }
 
         let recIDs = recRows.map { $0["id"] as String }
         guard !recIDs.isEmpty else { return [] }
@@ -484,14 +500,23 @@ enum DBReads {
         )
     }
 
-    static func relatedRecords(_ db: Database, sourceID: String) throws -> [RecordRow] {
+    static func relatedRecords(
+        _ db: Database,
+        sourceID: String,
+        excluding: Set<String> = []
+    ) throws -> [RecordRow] {
         let targetIDs = try String.fetchAll(db, sql: """
             SELECT target_record_id FROM relations WHERE source_record_id = ?
         """, arguments: [sourceID])
-        return try targetIDs.compactMap { try record(db, id: $0) }
+        return try targetIDs
+            .filter { !excluding.contains($0) }
+            .compactMap { try record(db, id: $0) }
     }
 
-    static func paletteItems(_ db: Database) throws -> [PaletteItem] {
+    static func paletteItems(
+        _ db: Database,
+        excluding: Set<String> = []
+    ) throws -> [PaletteItem] {
         var items: [PaletteItem] = []
         let dbs = try databases(db)
         for d in dbs {
@@ -513,6 +538,7 @@ enum DBReads {
         """)
         for row in recRows {
             let id: String = row["id"]
+            if excluding.contains(id) { continue }
             let dbID: String = row["database_id"]
             let dbname: String = row["dbname"]
             items.append(PaletteItem(

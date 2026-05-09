@@ -113,15 +113,21 @@ struct HomeView: View {
         .onChange(of: store.databases) { _, _ in
             Task { await loadData() }
         }
+        // Re-fire when the privacy hidden set changes so newly-protected
+        // records drop off the home tiles in the same tick.
+        .onChange(of: store.hiddenRecordIDs) { _, _ in
+            Task { await loadData() }
+        }
     }
 
     private func loadData() async {
-        people = (try? dbClient.records("people")) ?? []
-        pets = (try? dbClient.records("pets")) ?? []
-        vehicles = (try? dbClient.records("vehicles")) ?? []
-        documents = (try? dbClient.records("documents")) ?? []
-        events = (try? dbClient.records("events")) ?? []
-        maintenance = (try? dbClient.records("maintenance")) ?? []
+        let hidden = store.hiddenRecordIDs
+        people = (try? dbClient.records("people", hidden)) ?? []
+        pets = (try? dbClient.records("pets", hidden)) ?? []
+        vehicles = (try? dbClient.records("vehicles", hidden)) ?? []
+        documents = (try? dbClient.records("documents", hidden)) ?? []
+        events = (try? dbClient.records("events", hidden)) ?? []
+        maintenance = (try? dbClient.records("maintenance", hidden)) ?? []
     }
 
     private var toolbarDateLabel: String {

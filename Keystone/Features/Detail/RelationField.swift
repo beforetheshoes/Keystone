@@ -51,7 +51,8 @@ struct RelationField: View {
                 .popover(isPresented: $pickerOpen) {
                     RecordPickerPopover(
                         targetDatabaseID: targetDB,
-                        excludingRecordIDs: Set(linksForProperty.map(\.targetRecordID))
+                        excludingRecordIDs: Set(linksForProperty.map(\.targetRecordID)),
+                        hiddenRecordIDs: store.hiddenRecordIDs
                     ) { picked in
                         store.send(.addRelation(propertyID: property.id, targetRecordID: picked.id))
                         pickerOpen = false

@@ -33,7 +33,7 @@ final class SchemaTests: XCTestCase {
         try withDB {
             let dbClient = DatabaseClient.liveValue
 
-            let before = try dbClient.records("pets").count
+            let before = try dbClient.records("pets", []).count
 
             // Create
             let created = try dbClient.createRecord("pets", "Goose")
@@ -41,7 +41,7 @@ final class SchemaTests: XCTestCase {
             XCTAssertEqual(created.glyph, "G")
             XCTAssertEqual(created.databaseID, "pets")
 
-            let afterCreate = try dbClient.records("pets")
+            let afterCreate = try dbClient.records("pets", [])
             XCTAssertEqual(afterCreate.count, before + 1)
             XCTAssertTrue(afterCreate.contains { $0.id == created.id && $0.title == "Goose" })
 
@@ -68,7 +68,7 @@ final class SchemaTests: XCTestCase {
 
             // Delete
             try dbClient.deleteRecord(created.id)
-            let afterDelete = try dbClient.records("pets")
+            let afterDelete = try dbClient.records("pets", [])
             XCTAssertEqual(afterDelete.count, before)
             XCTAssertFalse(afterDelete.contains { $0.id == created.id })
         }
@@ -207,10 +207,10 @@ final class SchemaTests: XCTestCase {
 
             _ = try dbClient.addRelation(a.id, b.id, nil)
 
-            let outgoingFromA = try dbClient.outgoingRelations(a.id)
+            let outgoingFromA = try dbClient.outgoingRelations(a.id, [])
             XCTAssertTrue(outgoingFromA.contains { $0.targetRecordID == b.id })
 
-            let incomingToB = try dbClient.incomingRelations(b.id)
+            let incomingToB = try dbClient.incomingRelations(b.id, [])
             XCTAssertTrue(incomingToB.contains { $0.sourceRecordID == a.id })
         }
     }
@@ -344,7 +344,7 @@ final class SchemaTests: XCTestCase {
             XCTAssertNotNil(withCover?.coverImageURL)
 
             // Same record shows up in records(databaseID:) with the cover info hydrated.
-            let inList = try dbClient.records("people").first { $0.id == host.id }
+            let inList = try dbClient.records("people", []).first { $0.id == host.id }
             XCTAssertEqual(inList?.coverAssetID, asset.id)
 
             // Clear: cover ID goes to nil but the asset itself stays attached.
@@ -389,7 +389,7 @@ final class SchemaTests: XCTestCase {
             try dbClient.updatePropertyValue(created.id, "relationship", "Friend")
 
             // Simulate navigating back to the table view: re-fetch the record list.
-            let people = try dbClient.records("people")
+            let people = try dbClient.records("people", [])
             guard let fetched = people.first(where: { $0.id == created.id }) else {
                 XCTFail("Created record missing from refreshed list"); return
             }

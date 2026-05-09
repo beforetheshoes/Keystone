@@ -13,6 +13,15 @@ struct DatabaseDetailView: View {
         store.currentProperties.contains { $0.type == .date || $0.type == .dateTZ }
     }
 
+    /// Count of protected records currently hidden anywhere in the
+    /// workspace (literal seed minus the per-session unlock allow-list).
+    /// The cascade may add more, but the seed count is what the user
+    /// actually flagged — surfacing it directly avoids "you have 7
+    /// protected records" when only 1 is flagged + 6 are dependents.
+    private var lockedCount: Int {
+        store.protectedSeedIDs.subtracting(store.unlockedRecordIDs).count
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             KstToolbar(breadcrumb: [db.name]) {
@@ -115,6 +124,23 @@ struct DatabaseDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(KstColor.paper0)
             }
+
+            // Privacy footer — appears whenever the workspace has any
+            // currently-locked protected records (set ⇒ at least one
+            // record is hidden somewhere). Tapping prompts for biometric
+            // auth and unlocks every protected record for the session.
+            // Workspace-wide rather than per-database for v1; the cascade
+            // already crosses database boundaries (a protected trip
+            // hides its activities from another database), so per-DB
+            // counts would mislead.
+            if lockedCount > 0 {
+                ProtectedFooter(
+                    lockedCount: lockedCount,
+                    inFlight: store.authInFlight
+                ) {
+                    store.send(.unlockAllProtectedRequested)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(KstColor.paper0)
@@ -132,4 +158,42 @@ struct DatabaseDetailView: View {
         }
     }
 
+}
+
+/// Bottom-of-view button + label combo that surfaces protected-record
+/// state. Lives in the database-detail layout so anywhere the user
+/// browses records, the "show me what's hidden" affordance is one tap
+/// away.
+private struct ProtectedFooter: View {
+    var lockedCount: Int
+    var inFlight: Bool
+    var onUnlock: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(KstColor.ink3)
+            Text("\(lockedCount) protected record\(lockedCount == 1 ? "" : "s") hidden")
+                .font(.kstText(size: 12))
+                .foregroundStyle(KstColor.ink2)
+            Spacer(minLength: 0)
+            Button(action: onUnlock) {
+                HStack(spacing: 6) {
+                    if inFlight {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text("Show all")
+                        .font(.kstText(size: 12, weight: .semibold))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(inFlight)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 10)
+        .background(KstColor.paper1)
+        .overlay(alignment: .top) { KstHairline() }
+    }
 }

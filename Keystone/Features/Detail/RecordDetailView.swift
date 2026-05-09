@@ -40,6 +40,21 @@ struct RecordDetailView: View {
                         }
                         Divider()
                     }
+                    // Per-record protection toggle. Visible whenever the
+                    // current database has an `is_protected` checkbox
+                    // property — currently just trips, but the gate
+                    // generalizes if other databases adopt the property.
+                    if store.currentProperties.contains(where: { $0.key == "is_protected" }) {
+                        Button(isProtectedNow ? "Unmark as protected" : "Mark as protected") {
+                            let next = isProtectedNow ? "" : "true"
+                            store.send(.updatePropertyValue(
+                                recordID: record.id,
+                                key: "is_protected",
+                                value: next
+                            ))
+                        }
+                        Divider()
+                    }
                     Button("Delete record", role: .destructive) {
                         store.send(.deleteCurrentRecord)
                     }
@@ -197,6 +212,14 @@ struct RecordDetailView: View {
     /// (e.g., Eleanor's hand-curated `linked` relations).
     private var relatedNonProperty: [RelationLink] {
         store.currentOutgoingRelations.filter { $0.propertyID == nil }
+    }
+
+    /// True when the live record's `is_protected` value is currently
+    /// truthy. Mirrors `CheckboxField`'s parsing rules so the menu label
+    /// matches what the field cell would render.
+    private var isProtectedNow: Bool {
+        let raw = (record.values["is_protected"] ?? "").lowercased()
+        return raw == "true" || raw == "1" || raw == "yes"
     }
 
     @ViewBuilder

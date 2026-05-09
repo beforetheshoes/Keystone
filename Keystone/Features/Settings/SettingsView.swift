@@ -9,6 +9,13 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @AppStorage(KeystoneSettings.displayNameKey) private var displayName: String = ""
     @AppStorage(KeystoneSettings.openInDetailAfterAddKey) private var openInDetailAfterAdd: Bool = false
+    @AppStorage(KeystoneSettings.appLockEnabledKey) private var appLockEnabled: Bool = false
+    // Default-true wrapper: AppStorage doesn't have a "first-read default"
+    // for Bool other than `false`. KeystoneSettings.protectedRecordsHiddenWhenAppLockOff
+    // checks `object(forKey:) == nil` to handle that — we keep this view
+    // in sync by registering the default once on appear.
+    @AppStorage(KeystoneSettings.protectedRecordsHiddenWhenAppLockOffKey)
+    private var protectedRecordsHiddenWhenAppLockOff: Bool = true
 
     @State private var currentLocation: WorkspaceLocation = .container
     @State private var alert: AlertContent?
@@ -68,6 +75,18 @@ struct SettingsView: View {
                 Text("Behavior")
             } footer: {
                 Text("When you pick a Book, Movie, TV Show, or Vendor from the search sheet, Keystone normally stays on the gallery so you can add another record right away. Turn this on to jump into the new record's detail view instead.")
+            }
+
+            Section {
+                Toggle("Require biometric on launch", isOn: $appLockEnabled)
+                Toggle(
+                    "Always hide protected records (even with launch lock off)",
+                    isOn: $protectedRecordsHiddenWhenAppLockOff
+                )
+            } header: {
+                Text("Privacy")
+            } footer: {
+                Text("Mark a record as protected from its detail menu. Protected records (and any record that links to them) stay hidden from sidebar, search, calendar, and database views until you authenticate. The SQLite file itself isn't encrypted — this is a UI-level lock, not data-at-rest protection. CLI access bypasses the filter by design.")
             }
 
             Section {

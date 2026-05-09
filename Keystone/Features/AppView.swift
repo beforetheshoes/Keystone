@@ -33,6 +33,15 @@ struct AppView: View {
                 .transition(.opacity)
                 .zIndex(3)
             }
+            // App-launch privacy lock. Sits above every other overlay so
+            // a deep link / palette pre-fetch can never sneak protected
+            // content under the prompt. The view itself blocks pass-
+            // through clicks/keystrokes.
+            if !store.appLockUnlocked {
+                AppLockView(store: store)
+                    .transition(.opacity)
+                    .zIndex(10)
+            }
         }
         .task { await store.send(.task).finish() }
         #if os(macOS)
@@ -67,7 +76,12 @@ private struct MacMainPane: View {
                 Color(KstColor.paper0)
             }
         case let .record(_, recordID):
-            if let rec = store.currentRecord, rec.id == recordID, let db = store.currentDB {
+            if store.hiddenRecordIDs.contains(recordID) {
+                // Record exists but is currently hidden by the privacy
+                // lock cascade. Inline placeholder offers a per-record
+                // unlock prompt without leaking the title.
+                RecordLockView(store: store, recordID: recordID, title: nil)
+            } else if let rec = store.currentRecord, rec.id == recordID, let db = store.currentDB {
                 RecordDetailView(store: store, db: db, record: rec)
             } else {
                 Color(KstColor.paper0)
