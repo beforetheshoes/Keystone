@@ -1,4 +1,5 @@
 import Foundation
+import Dependencies
 import GRDB
 import os
 @preconcurrency import SQLiteData
@@ -90,18 +91,16 @@ enum AppDatabase {
     /// files mid-session and corrupt or destroy data; the database must
     /// always live in a sandbox-private location regardless of where the
     /// user wants their files visible.
+    /// Read through the `workspaceFolder` dependency so tests can
+    /// override the path without mutating the singleton or polluting
+    /// the user's real iCloud Drive / Application Support location.
+    /// The `liveValue` of the dependency calls
+    /// `WorkspaceLocationManager.shared.resolve()` exactly as before,
+    /// so production behavior is unchanged. New code should prefer
+    /// `@Dependency(\.workspaceFolder)` directly.
     static var workspaceFolder: URL {
-        do {
-            return try WorkspaceLocationManager.shared.resolve()
-        } catch {
-            os_log(
-                .error,
-                log: OSLog(subsystem: "Keystone", category: "Workspace"),
-                "workspaceFolder resolution failed (%{public}@), falling back to container",
-                error.localizedDescription
-            )
-            return WorkspaceLocationManager.containerWorkspaceFolder
-        }
+        @Dependency(\.workspaceFolder) var injected
+        return injected
     }
 
     /// Folder that holds `workspace.sqlite` and its WAL/SHM siblings.
@@ -213,6 +212,12 @@ enum AppDatabase {
 
         var config = Configuration()
         config.foreignKeysEnabled = true
+        // 10-second busy timeout for cooperative locking with the
+        // `--cli` binary, which talks to the same workspace.sqlite
+        // and may be running concurrently with the GUI app. Without
+        // this, either side fails immediately on `database is locked`
+        // the moment a write contends. Both paths set the same value.
+        config.busyMode = .timeout(10)
 
         let writer: any DatabaseWriter = try defaultDatabase(
             path: url.path,
@@ -307,8 +312,32 @@ enum AppDatabase {
         migrator.registerMigration("v26-travel-direct-addresses") { db in
             try Schema.seedTravelAddressesV26(db)
         }
+        migrator.registerMigration("v27-dedupe-relations") { db in
+            try Schema.dedupeRelationsV27(db)
+        }
         migrator.registerMigration("v16-relocate-assets") { db in
             try Schema.relocateAssetsV16(db)
+        }
+        migrator.registerMigration("v28-service-catalog") { db in
+            try Schema.seedServiceCatalogV28(db)
+        }
+        migrator.registerMigration("v29-drop-severe-catalog-rows") { db in
+            try Schema.dropSevereCatalogRowsV29(db)
+        }
+        migrator.registerMigration("v30-drop-relation-unique-indexes") { db in
+            try Schema.dropRelationUniqueIndexesV30(db)
+        }
+        migrator.registerMigration("v31-rename-services-performed") { db in
+            try Schema.renameServicesPerformedV31(db)
+        }
+        migrator.registerMigration("v32-gmc-catalog") { db in
+            try Schema.seedGMCCatalogV32(db)
+        }
+        migrator.registerMigration("v33-add-sidecar-path") { db in
+            try Schema.addSidecarPathV33(db)
+        }
+        migrator.registerMigration("v34-relocate-vm-assets-in-place") { db in
+            try Schema.relocateVehicleMaintenanceAssetsInPlaceV34(db)
         }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
@@ -346,6 +375,19 @@ enum AppDatabase {
         try? writer.write { db in
             let n = try DBWrites.backfillRelationsByTitle(db)
             if n > 0 { bootLog.notice("backfillRelationsByTitle promoted \(n) text values to relations") }
+        }
+
+        // Dedupe `relations` after CloudKit may have replicated
+        // duplicates from another device. We can't enforce this with
+        // a SQLite UNIQUE constraint because SyncEngine rejects them
+        // on synchronized tables (it bricks `SyncEngine.init` with
+        // `SchemaError.uniquenessConstraint`). Instead, dedupe at
+        // boot — application writes already do find-or-insert via
+        // `DBWrites.addRelation`, so this only mops up sync-induced
+        // collisions.
+        try? writer.write { db in
+            let n = try DBWrites.dedupeRelations(db)
+            if n > 0 { bootLog.notice("dedupeRelations removed \(n) duplicate relation rows") }
         }
 
         // Populate editor blocks for records that arrived with a .md

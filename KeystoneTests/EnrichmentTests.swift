@@ -151,15 +151,7 @@ final class EnrichmentTests: XCTestCase {
     // MARK: - Helpers
 
     private func withBootstrappedDB(_ body: @Sendable () async throws -> Void) async throws {
-        try await withDependencies { values in
-            do {
-                try values.bootstrapKeystoneDatabase(configureSyncEngine: false)
-            } catch {
-                XCTFail("Bootstrap failed: \(error)")
-            }
-        } operation: {
-            try await body()
-        }
+        try await withHermeticDB(body)
     }
 }
 

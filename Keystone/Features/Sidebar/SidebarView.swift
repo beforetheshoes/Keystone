@@ -73,6 +73,20 @@ struct SidebarView: View {
                                     isActive: store.nav == .database(db.id)
                                 ) { store.send(.setNav(.database(db.id))) }
                             }
+                            // The Mobility area gets a derived "what's
+                            // due" report alongside its databases —
+                            // not a record list, so it lives next to
+                            // them instead of inside one. When more
+                            // sidecar-backed areas land (Home, Pets),
+                            // each one gets its own equivalent.
+                            if area.id == "area-mobility" {
+                                SidebarRowView(
+                                    icon: .system("wrench.and.screwdriver"),
+                                    label: "Maintenance Schedule",
+                                    count: nil,
+                                    isActive: store.nav == .maintenanceSchedule
+                                ) { store.send(.setNav(.maintenanceSchedule)) }
+                            }
                         }
                     }
 

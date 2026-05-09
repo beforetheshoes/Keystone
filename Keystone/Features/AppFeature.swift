@@ -97,6 +97,11 @@ struct AppFeature {
         case record(databaseID: String, recordID: String)
         case tag(tagID: String)
         case help(topic: String)
+        /// Cross-database derived view: per-vehicle "what's due / overdue"
+        /// computed from `service_catalog` items joined against
+        /// `vehicle_maintenance` events. Not a database route — this
+        /// is a report, not a record list.
+        case maintenanceSchedule
     }
 
     struct TaggedRecord: Equatable, Sendable, Identifiable {
@@ -181,6 +186,14 @@ struct AppFeature {
         case captureKindChanged(CaptureKind)
         case captureSubmit
         case createBlankRecord(databaseID: String)
+        /// "+ Log service" from the maintenance schedule view. Creates
+        /// a blank `vehicle_maintenance` record, immediately wires the
+        /// `vehicle` relation to the chosen vehicle, and opens the
+        /// detail page for the user to fill in date / mileage /
+        /// services. The new record is otherwise identical to one
+        /// created via the standard "+ New" affordance — same fields,
+        /// same sidecar materialization, same downstream behavior.
+        case logServiceForVehicle(vehicleID: String)
         /// Open the lookup-first creation sheet for a database with a
         /// registered `LookupProvider`. Falls through to
         /// `createBlankRecord` if no provider is available right now.
@@ -200,6 +213,7 @@ struct AppFeature {
         case updateRecordTitle(recordID: String, title: String)
         case updatePropertyValue(recordID: String, key: String, value: String)
         case deleteCurrentRecord
+        case deleteAllRecordsInDatabase(databaseID: String)
         case changeRecordDatabase(recordID: String, newDatabaseID: String)
         case refreshSidebar
         case sidebarRefreshed(databases: [DBRow], palette: [PaletteItem])
@@ -342,6 +356,15 @@ struct AppFeature {
                         // provider self-gates on availability (e.g.
                         // TMDB providers no-op without an API key).
                         EnrichmentService.shared.start()
+                    },
+                    .run { _ in
+                        // Watch <workspace>/Cars/ for external edits
+                        // to sidecar `.md` files. SidecarWriter writes
+                        // are recognized via the SidecarHashCache and
+                        // ignored, so this only fires on real
+                        // out-of-band edits (Finder, another device's
+                        // iCloud sync, a text editor outside Keystone).
+                        CarsWatcher.shared.start()
                     }
                 )
 
@@ -357,7 +380,7 @@ struct AppFeature {
                 state.sortAscending = true
                 state.filters = []
                 switch nav {
-                case .home, .help:
+                case .home, .help, .maintenanceSchedule:
                     state.currentDB = nil
                     state.currentProperties = []
                     state.currentRecords = []
@@ -573,6 +596,17 @@ struct AppFeature {
                     await send(.recordCreated(record: rec, openDetail: true))
                 }
 
+            case let .logServiceForVehicle(vehicleID):
+                return .run { send in
+                    guard let rec = try? dbClient.createRecord("vehicle_maintenance", "Untitled") else { return }
+                    // Wire the vehicle relation immediately so the
+                    // user lands on a record that already knows which
+                    // car it's for. Best-effort: failure here doesn't
+                    // block the navigation.
+                    _ = try? dbClient.addRelation(rec.id, vehicleID, "vehicle_maintenance.vehicle")
+                    await send(.recordCreated(record: rec, openDetail: true))
+                }
+
             case let .openLookup(databaseID, databaseName):
                 // Fall through to blank-create if there's no provider
                 // registered, or the provider isn't available right now
@@ -740,6 +774,20 @@ struct AppFeature {
                 state.currentRecords.removeAll { $0.id == recID }
                 return .run { send in
                     try? dbClient.deleteRecord(recID)
+                    await send(.refreshSidebar)
+                    await send(.refreshCurrentRecords)
+                }
+
+            case let .deleteAllRecordsInDatabase(databaseID):
+                // Optimistically clear the in-memory record list when
+                // we're currently viewing the database the user is
+                // wiping. The DB write happens async; the next
+                // refreshCurrentRecords reconciles state.
+                if case .database(let viewing) = state.nav, viewing == databaseID {
+                    state.currentRecords = []
+                }
+                return .run { send in
+                    _ = try? dbClient.deleteAllRecordsInDatabase(databaseID)
                     await send(.refreshSidebar)
                     await send(.refreshCurrentRecords)
                 }

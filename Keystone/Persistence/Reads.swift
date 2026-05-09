@@ -306,12 +306,31 @@ enum DBReads {
             WHERE rel.source_record_id IN (\(placeholders))
         """, arguments: StatementArguments(recIDs))) ?? []
         var relationsByRecord: [String: [String: [RelationTarget]]] = [:]
+        // Tracks which (record, property) pairs we've already started
+        // populating from `relations`. The first hit for a pair clears
+        // any residual `property_values` text (e.g. legacy text written
+        // into a column that was later switched to a relation) so
+        // relation-derived titles don't get prepended to a stale string.
+        var clearedKeys: Set<String> = []
+        // Per (record, property), tracks target ids we've already
+        // appended so duplicate `relations` rows (from sync conflicts /
+        // older unconstrained inserts) render as ONE title, not "Foo,
+        // Foo, Foo".
+        var seenTargets: [String: Set<String>] = [:]
         for row in relRows {
             guard let rid: String = row["source_record_id"],
                   let key: String = row["key"],
                   let targetID: String = row["target_id"],
                   let targetDB: String = row["target_db"],
                   let title: String = row["target_title"] else { continue }
+            let pairKey = "\(rid)|\(key)"
+            if !clearedKeys.contains(pairKey) {
+                byRecord[rid, default: [:]][key] = ""
+                clearedKeys.insert(pairKey)
+            }
+            if seenTargets[pairKey, default: []].contains(targetID) { continue }
+            seenTargets[pairKey, default: []].insert(targetID)
+
             if let existing = byRecord[rid]?[key], !existing.isEmpty {
                 byRecord[rid, default: [:]][key] = existing + ", " + title
             } else {
@@ -424,11 +443,24 @@ enum DBReads {
             WHERE rel.source_record_id = ?
         """, arguments: [id])) ?? []
         var relationTargets: [String: [RelationTarget]] = [:]
+        // Same dedup logic as `records()`: clear any residual
+        // property_values text on first relation hit per key, and skip
+        // duplicate target ids so the comma-joined display doesn't
+        // show "Foo, Foo, Foo" for orphan duplicate relation rows.
+        var clearedKeys: Set<String> = []
+        var seenTargets: [String: Set<String>] = [:]
         for vrow in relRows {
             guard let key: String = vrow["key"],
                   let targetID: String = vrow["target_id"],
                   let targetDB: String = vrow["target_db"],
                   let title: String = vrow["target_title"] else { continue }
+            if !clearedKeys.contains(key) {
+                values[key] = ""
+                clearedKeys.insert(key)
+            }
+            if seenTargets[key, default: []].contains(targetID) { continue }
+            seenTargets[key, default: []].insert(targetID)
+
             if let existing = values[key], !existing.isEmpty {
                 values[key] = existing + ", " + title
             } else {

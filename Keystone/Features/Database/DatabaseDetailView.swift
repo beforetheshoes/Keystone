@@ -5,6 +5,8 @@ struct DatabaseDetailView: View {
     @Bindable var store: StoreOf<AppFeature>
     var db: DBRow
 
+    @State private var deleteAllConfirming: Bool = false
+
     /// Show the Calendar item in the view switcher only when the
     /// database has a column the calendar can plot against.
     private var hasDateProperty: Bool {
@@ -23,6 +25,25 @@ struct DatabaseDetailView: View {
                 }) {
                     Text("+ New")
                 }
+                Menu {
+                    Button("Delete all records…", role: .destructive) {
+                        deleteAllConfirming = true
+                    }
+                    .disabled(store.currentRecords.isEmpty)
+                } label: {
+                    Text("⋯")
+                }
+                #if os(macOS)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .frame(height: 26).padding(.horizontal, 10)
+                .background(KstColor.paper0)
+                .overlay(
+                    RoundedRectangle(cornerRadius: KstRadius.r2, style: .continuous)
+                        .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: KstRadius.r2, style: .continuous))
+                #endif
             }
 
             // Subheader: title, count
@@ -97,6 +118,18 @@ struct DatabaseDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(KstColor.paper0)
+        .confirmationDialog(
+            "Delete all records in \(db.name)?",
+            isPresented: $deleteAllConfirming,
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(store.currentRecords.count) record\(store.currentRecords.count == 1 ? "" : "s")", role: .destructive) {
+                store.send(.deleteAllRecordsInDatabase(databaseID: db.id))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes every record (including attached files) and can't be undone.")
+        }
     }
 
 }

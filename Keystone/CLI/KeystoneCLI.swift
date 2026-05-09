@@ -56,6 +56,10 @@ enum KeystoneCLI {
             case "enrich-vendor":       try enrichVendor(args: rest)
             case "enrich-all-vendors":  try enrichAllVendors(args: rest)
             case "promote-relations":   try promoteRelations()
+            case "backfill-sidecar-frontmatter": try backfillSidecarFrontmatter(args: rest)
+            case "import-sidecars":     try importSidecars(args: rest)
+            case "wipe-vehicle-maintenance": try wipeVehicleMaintenance(args: rest)
+            case "maintenance-status":  try maintenanceStatus(args: rest)
             case "help", "-h", "--help":
                 printUsage()
             default:
@@ -600,6 +604,135 @@ enum KeystoneCLI {
         return applied
     }
 
+    // MARK: - Maintenance / sidecar import
+
+    /// Walk a `Cars/` directory and fill in missing vendor / mileage /
+    /// cost / services frontmatter on each `*.pdf-processed-markdown.md`
+    /// sidecar. Existing frontmatter values are never overwritten.
+    /// `--dry-run` emits the plan without touching files.
+    private static func backfillSidecarFrontmatter(args: [String]) throws {
+        guard let rootPath = flag("--root", in: args) else {
+            stderr("usage: backfill-sidecar-frontmatter --root <Cars dir> [--dry-run]")
+            exit(1)
+        }
+        let dryRun = args.contains("--dry-run")
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        let result = BackfillSidecarFrontmatterCLI.run(rootURL: rootURL, dryRun: dryRun)
+        emit(result)
+    }
+
+    /// Walk a `Cars/` directory and upsert one `vehicle_maintenance`
+    /// record per sidecar markdown file, plus link `services`
+    /// relations to Service Catalog rows referenced in the YAML
+    /// `services:` list. Idempotent — re-runs land on the same record
+    /// IDs and refresh any property values that changed.
+    private static func importSidecars(args: [String]) throws {
+        guard let rootPath = flag("--root", in: args) else {
+            stderr("usage: import-sidecars --root <Cars dir>")
+            exit(1)
+        }
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        let result = try ImportSidecarsCLI.run(rootURL: rootURL)
+        emit(result)
+    }
+
+    /// Hard-delete every record in the `vehicle_maintenance` database
+    /// plus its asset files on disk, and clear each vehicle's
+    /// `current_mileage` / `current_mileage_as_of` snapshot. Intended
+    /// as a clean slate before re-running `import-sidecars` against
+    /// freshly-curated sidecar frontmatter.
+    ///
+    /// Requires an explicit `--yes` to actually delete; without it we
+    /// only print what *would* go.
+    private static func wipeVehicleMaintenance(args: [String]) throws {
+        let confirmed = args.contains("--yes")
+        @Dependency(\.defaultDatabase) var database
+        let report: [String: Any] = try database.write { db in
+            let recordIDs = try String.fetchAll(
+                db,
+                sql: "SELECT id FROM records WHERE database_id = 'vehicle_maintenance'"
+            )
+            let assetIDs = try String.fetchAll(
+                db,
+                sql: """
+                    SELECT a.id FROM assets a
+                    JOIN records r ON r.id = a.record_id
+                    WHERE r.database_id = 'vehicle_maintenance'
+                """
+            )
+            let vehicleIDs = try String.fetchAll(
+                db,
+                sql: "SELECT id FROM records WHERE database_id = 'vehicles'"
+            )
+
+            guard confirmed else {
+                return [
+                    "dry_run": true,
+                    "would_delete_records": recordIDs.count,
+                    "would_delete_assets": assetIDs.count,
+                    "would_clear_current_mileage_on_vehicles": vehicleIDs.count,
+                    "note": "pass --yes to actually delete",
+                ]
+            }
+
+            let result = try DBWrites.deleteAllRecordsInDatabase(db, databaseID: "vehicle_maintenance")
+            return [
+                "dry_run": false,
+                "deleted_records": result.deletedRecords,
+                "deleted_assets": result.deletedAssets,
+                "cleared_current_mileage_on_vehicles": vehicleIDs.count,
+            ]
+        }
+        emit(report)
+    }
+
+    /// Print next-due / overdue maintenance status for one or all
+    /// vehicles. `--vehicle "<title>"` filters to a single car. With
+    /// no arg, every vehicle is reported.
+    private static func maintenanceStatus(args: [String]) throws {
+        @Dependency(\.defaultDatabase) var database
+        let onlyTitle = flag("--vehicle", in: args)
+        let payload: [[String: Any]] = try database.read { db in
+            let catalog  = try MaintenanceReads.catalogItems(db)
+            let events   = try MaintenanceReads.events(db)
+            let vehicles = try MaintenanceReads.vehicleSnapshots(db)
+            let engine = MaintenanceStatusEngine()
+            let isoDay = DateFormatter()
+            isoDay.dateFormat = "yyyy-MM-dd"
+            isoDay.timeZone = TimeZone(identifier: "UTC")
+            return vehicles
+                .filter { onlyTitle == nil || $0.title.lowercased() == onlyTitle!.lowercased() }
+                .map { vehicle -> [String: Any] in
+                    let statuses = engine.computeStatuses(vehicle: vehicle, catalog: catalog, events: events)
+                    return [
+                        "vehicle_id": vehicle.id,
+                        "vehicle_title": vehicle.title,
+                        "current_mileage": vehicle.currentMileage as Any,
+                        "current_mileage_as_of": vehicle.currentMileageAsOf.map { isoDay.string(from: $0) } as Any,
+                        "items": statuses.map { s -> [String: Any] in
+                            [
+                                "catalog_id": s.catalogID,
+                                "title": s.title,
+                                "kind": s.kind.rawValue,
+                                "last_event_date": s.lastEventDate.map { isoDay.string(from: $0) } as Any,
+                                "last_event_mileage": s.lastEventMileage as Any,
+                                "next_due_date": s.nextDueDate.map { isoDay.string(from: $0) } as Any,
+                                "next_due_mileage": s.nextDueMileage as Any,
+                                "days_until_due": s.daysUntilDue as Any,
+                                "missed_window_evidence": s.missedWindowEvidence.map { ev -> [String: Any] in
+                                    [
+                                        "event_date": isoDay.string(from: ev.eventDate),
+                                        "event_mileage": ev.eventMileage,
+                                    ]
+                                } as Any,
+                            ]
+                        }
+                    ]
+                }
+        }
+        emit(payload)
+    }
+
     /// Drive an `async` task to completion from a synchronous CLI
     /// command. We can't just block on a semaphore — MapKit's
     /// network callbacks need the main thread's run loop to spin —
@@ -724,6 +857,13 @@ enum KeystoneCLI {
           create-block <recordID> --kind <kind> --text <text> [--after <blockID>] [--checked <bool>]
           update-block <blockID> --text <text>           replace block text (plain string)
           delete-block <blockID>                         delete block
+
+        Maintenance / sidecar:
+          backfill-sidecar-frontmatter --root <dir> [--dry-run]
+                                                         fill missing vendor/mileage/cost/services in *.pdf-processed-markdown.md
+          import-sidecars --root <dir>                   upsert vehicle_maintenance records from sidecar frontmatter
+          wipe-vehicle-maintenance [--yes]               delete every vehicle_maintenance record + assets (clean slate)
+          maintenance-status [--vehicle "<title>"]       next-due/overdue report against the Service Catalog
 
         Escape hatch:
           sql "<query>"                                  raw SQL; reads return JSON, writes return {ok:true}

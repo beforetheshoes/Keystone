@@ -6,15 +6,7 @@ import GRDB
 
 final class DateTZTests: XCTestCase {
     private func withDB<T>(_ body: () throws -> T) rethrows -> T {
-        try withDependencies { values in
-            do {
-                try values.bootstrapKeystoneDatabase(configureSyncEngine: false)
-            } catch {
-                XCTFail("Bootstrap failed: \(error)")
-            }
-        } operation: {
-            try body()
-        }
+        try withHermeticDB(body)
     }
 
     // MARK: - Codec

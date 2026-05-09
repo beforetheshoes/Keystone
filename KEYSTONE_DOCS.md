@@ -24,6 +24,7 @@ When changing or adding a feature in any of these areas, **also update the match
 | Enrichment & API keys     | [18-enrichment.md](Keystone/Resources/Help/18-enrichment.md)         |
 | Calendar view             | [19-calendar.md](Keystone/Resources/Help/19-calendar.md)             |
 | Collections (media)       | [20-collections.md](Keystone/Resources/Help/20-collections.md)       |
+| Maintenance scheduling    | [21-maintenance-scheduling.md](Keystone/Resources/Help/21-maintenance-scheduling.md) |
 
 ## Process
 

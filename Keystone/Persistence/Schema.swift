@@ -1072,6 +1072,60 @@ enum Schema {
         }
     }
 
+    /// v27: dedupe duplicate relation rows that accumulated under the
+    /// pre-uniqueness schema and add partial unique indexes so they
+    /// can't return. Symptom that prompted this: a vehicle-maintenance
+    /// record's Vehicle column was rendering the same target as a
+    /// comma-joined list ("2006 GMC Canyon, 2006 GMC Canyon, …")
+    /// because the fetcher emits one row per `relations` entry and
+    /// nothing was constraining (source, target, property) to one row.
+    ///
+    /// Strategy: keep the oldest `relations` row per (source, target,
+    /// property) tuple, delete the rest. Then add two partial unique
+    /// indexes — one for property-bound relations, one for unbound —
+    /// so future inserts can't re-create duplicates. Idempotent: the
+    /// `IF NOT EXISTS` on the indexes makes the migration safe to
+    /// re-run (GRDB never re-runs registered migrations, but defensive
+    /// against a manual replay).
+    static func dedupeRelationsV27(_ db: Database) throws {
+        // Collapse property-bound duplicates: same source, target, and
+        // property — keep the row with the smallest rowid (oldest).
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NOT NULL
+                GROUP BY source_record_id, target_record_id, property_id
+            )
+            AND property_id IS NOT NULL
+        """)
+
+        // And property-unbound duplicates (free-form `linked` relations
+        // created from the detail view's "Related" panel).
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NULL
+                GROUP BY source_record_id, target_record_id
+            )
+            AND property_id IS NULL
+        """)
+
+        try db.execute(sql: """
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_relations_bound
+            ON relations(source_record_id, target_record_id, property_id)
+            WHERE property_id IS NOT NULL
+        """)
+        try db.execute(sql: """
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_relations_unbound
+            ON relations(source_record_id, target_record_id)
+            WHERE property_id IS NULL
+        """)
+    }
+
     /// v23: flip the four time-of-day Travel properties from plain `date`
     /// to time-zone-aware `date_tz`. Activities and lodging now carry
     /// instants in the event's local time zone (with the IANA tz id
@@ -1409,6 +1463,563 @@ enum Schema {
             DELETE FROM relations
             WHERE source_record_id NOT IN (SELECT id FROM records)
                OR target_record_id NOT IN (SELECT id FROM records)
+        """)
+    }
+
+    /// v28: introduce the Service Catalog database + the `services`
+    /// multi-relation that links a maintenance event back to one or
+    /// more catalog items, plus current-mileage tracking on
+    /// `vehicles`. (Shipped originally as `services_performed`;
+    /// renamed to `services` in v31 so the YAML key matches the
+    /// property key.) The catalog is the structural backbone
+    /// for the next-due / overdue computation: each row is a recurring
+    /// service with a mileage-and/or-time interval, optionally scoped
+    /// to specific subjects. Adding subject kinds (home, pet) later is
+    /// a config change — no further schema work needed.
+    ///
+    /// Honda Maintenance Schedule rows (Normal + Severe) ship pre-seeded
+    /// per the user's directive to apply this PDF as the schedule for
+    /// both 2015 Honda Fit and 2018 Honda CR-V. Catalog row IDs are
+    /// stable strings (`svc-honda-…`) so sidecar frontmatter can
+    /// reference them directly without round-tripping through UUIDs.
+    ///
+    /// Idempotent — `INSERT OR IGNORE` on every row, plus the
+    /// `applies_to_vehicles` link is created via INSERT OR IGNORE
+    /// against the v27 partial-unique-index (source, target, property).
+    static func seedServiceCatalogV28(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        guard let workspaceID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM workspaces ORDER BY created_at LIMIT 1"
+        ) else { return }
+
+        // Service Catalog database — sits in the Mobility area for now
+        // because vehicles is the only subject kind with rows on day
+        // one; can be relocated to a dedicated "Records/Schedules" area
+        // later without breaking links.
+        let catalogSort = (try Double.fetchOne(
+            db,
+            sql: "SELECT MAX(sort_index) FROM databases WHERE area_id = 'area-mobility'"
+        ) ?? 4.5) + 0.1
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO databases
+                    (id, workspace_id, area_id, name, plural_name, icon, accent, default_view, created_at, updated_at, sort_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                "service_catalog", workspaceID, "area-mobility",
+                "Service Catalog", "Service Catalog",
+                "SC", "iris", "list", now, now, catalogSort
+            ]
+        )
+
+        struct P { let db: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let vehiclesRel = #"{"targetDatabaseID":"vehicles"}"#
+        let catalogRel  = #"{"targetDatabaseID":"service_catalog","multi":true}"#
+        let catalogSelf = #"{"targetDatabaseID":"service_catalog"}"#
+        let subjectKindCfg = #"{"options":["vehicle","home","pet"]}"#
+        let severityCfg = #"{"options":["normal","severe"]}"#
+        let stageCfg = #"{"options":["first","recurring"]}"#
+
+        let props: [P] = [
+            // service_catalog
+            .init(db: "service_catalog", key: "name",         label: "Service",           type: "title",    sort: 0,  cfg: "{}"),
+            .init(db: "service_catalog", key: "subject_kind", label: "Applies to (kind)", type: "select",   sort: 1,  cfg: subjectKindCfg),
+            .init(db: "service_catalog", key: "applies_to_vehicles", label: "Vehicles",   type: "relation", sort: 2,  cfg: #"{"targetDatabaseID":"vehicles","multi":true}"#),
+            .init(db: "service_catalog", key: "interval_miles",  label: "Every (mi)",     type: "number",   sort: 3,  cfg: "{}"),
+            .init(db: "service_catalog", key: "interval_months", label: "Every (months)", type: "number",   sort: 4,  cfg: "{}"),
+            .init(db: "service_catalog", key: "schedule_severity", label: "Schedule",     type: "select",   sort: 5,  cfg: severityCfg),
+            .init(db: "service_catalog", key: "stage",        label: "Stage",             type: "select",   sort: 6,  cfg: stageCfg),
+            .init(db: "service_catalog", key: "predecessor",  label: "After",             type: "relation", sort: 7,  cfg: catalogSelf),
+            .init(db: "service_catalog", key: "notes",        label: "Notes",             type: "text",     sort: 8,  cfg: "{}"),
+            // vehicle_maintenance.services (multi-relation to catalog)
+            .init(db: "vehicle_maintenance", key: "services", label: "Services", type: "relation", sort: 6.5, cfg: catalogRel),
+            // vehicles current-mileage snapshot — recomputed by importer
+            .init(db: "vehicles", key: "current_mileage",         label: "Current mileage", type: "number", sort: 7.0, cfg: "{}"),
+            .init(db: "vehicles", key: "current_mileage_as_of",   label: "As of",           type: "date",   sort: 7.1, cfg: "{}"),
+        ]
+        // Keep `vehiclesRel` referenced for any future row added during
+        // a follow-up; right now the only relation that points at
+        // vehicles is `applies_to_vehicles` which is inlined above.
+        _ = vehiclesRel
+        for p in props {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.db).\(p.key)", p.db,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+
+        try seedHondaCatalogRows(db)
+    }
+
+    /// Idempotent insertion of the Honda Maintenance Schedule catalog
+    /// rows + their `applies_to_vehicles` links. Called from both the
+    /// v28 migration (existing workspaces) and `Seed.runIfEmpty` (fresh
+    /// installs, where the v28 migration runs *before* the workspace
+    /// exists and exits early). Vehicle links resolve by record title
+    /// and silently skip when the target vehicle isn't in Keystone yet.
+    static func seedHondaCatalogRows(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        // Bail if the catalog database itself isn't present yet — the
+        // schema migration's INSERT OR IGNORE on `databases` is what
+        // creates it, and on a brand-new install Seed.runIfEmpty runs
+        // *before* migrations on the very first writer access. This
+        // function is called again from `runIfEmpty` after the database
+        // row is guaranteed to exist.
+        let dbExists = (try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM databases WHERE id = 'service_catalog'"
+        ) ?? 0) > 0
+        guard dbExists else { return }
+
+        for item in HondaMaintenanceSchedule.catalogRows {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO records
+                        (id, database_id, title, glyph, tone, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    item.id, "service_catalog", item.title,
+                    makeGlyph(from: item.title), "iris", now, now, item.sort
+                ]
+            )
+            try setCatalogPropertyValue(db, recordID: item.id, key: "subject_kind", text: "vehicle", now: now)
+            if let stage = item.stage {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "stage", text: stage, now: now)
+            }
+            if let miles = item.intervalMiles {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "interval_miles", number: Double(miles), now: now)
+            }
+            if let months = item.intervalMonths {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "interval_months", number: Double(months), now: now)
+            }
+            if let notes = item.notes, !notes.isEmpty {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "notes", text: notes, now: now)
+            }
+            if let predecessor = item.predecessorID {
+                try linkCatalogPredecessor(db, sourceID: item.id, targetID: predecessor, now: now)
+            }
+            for vehicleTitle in item.vehicleTitles {
+                if let vehicleID = try String.fetchOne(
+                    db,
+                    sql: "SELECT id FROM records WHERE database_id = 'vehicles' AND LOWER(title) = LOWER(?) LIMIT 1",
+                    arguments: [vehicleTitle]
+                ) {
+                    try db.execute(
+                        sql: """
+                            INSERT OR IGNORE INTO relations
+                                (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                            VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                        """,
+                        arguments: [
+                            UUID().uuidString, item.id, vehicleID,
+                            "service_catalog.applies_to_vehicles", now, now
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
+    /// Helper used only by `seedServiceCatalogV28` — direct property-value
+    /// upsert that bypasses `DBWrites.updatePropertyValue` so the
+    /// migration doesn't depend on the writes module's relation
+    /// auto-resolution. Catalog rows have no relations beyond the
+    /// hand-crafted `applies_to_vehicles` and `predecessor` links above.
+    private static func setCatalogPropertyValue(
+        _ db: Database, recordID: String, key: String,
+        text: String? = nil, number: Double? = nil, now: String
+    ) throws {
+        let propID = "service_catalog.\(key)"
+        let pvID = "\(recordID).\(key)"
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO property_values
+                    (id, record_id, property_id, text_value, number_value, date_value, json_value, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+            """,
+            arguments: [pvID, recordID, propID, text, number, now, now]
+        )
+    }
+
+    private static func linkCatalogPredecessor(
+        _ db: Database, sourceID: String, targetID: String, now: String
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO relations
+                    (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                VALUES (?, ?, ?, 'linked', ?, ?, ?)
+            """,
+            arguments: [
+                UUID().uuidString, sourceID, targetID,
+                "service_catalog.predecessor", now, now
+            ]
+        )
+    }
+
+    /// v34: re-point existing `vehicle_maintenance` asset rows from the
+    /// duplicated copy under `Assets/Vehicle Maintenance/<title>-<id>/`
+    /// to the canonical PDF inside the sidecar bundle (`Cars/<vehicle>/
+    /// <folder>/<basename>.pdf`). The Assets/ copy is then deleted.
+    ///
+    /// Why: Cars/ already holds the canonical PDF next to its `.md`
+    /// sidecar. The original importer copied that PDF a second time
+    /// into Assets/ via `AssetImporter.importFile`, which doubled disk
+    /// + iCloud bandwidth (~173 MB on the seed dataset) without
+    /// producing any user-visible benefit. After this migration,
+    /// `AssetImporter.registerInPlace` is the path used at import time
+    /// and the asset row points directly at the bundle file.
+    ///
+    /// Idempotent. Records whose new (Cars/) location is missing on
+    /// disk get logged and left alone; the migration never deletes the
+    /// only copy of a file it can't repoint. Assets in other databases
+    /// are untouched.
+    static func relocateVehicleMaintenanceAssetsInPlaceV34(_ db: Database) throws {
+        let fm = FileManager.default
+        let workspaceRoot = AppDatabase.workspaceFolder
+
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT a.id AS asset_id,
+                   a.relative_path AS old_relative,
+                   a.original_filename AS filename,
+                   r.sidecar_path AS sidecar_path
+            FROM assets a
+            JOIN records r ON r.id = a.record_id
+            WHERE r.database_id = 'vehicle_maintenance'
+              AND a.relative_path LIKE 'Assets/Vehicle Maintenance/%'
+              AND r.sidecar_path IS NOT NULL
+              AND r.sidecar_path != ''
+        """)
+
+        var relocated = 0
+        var skipped = 0
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        for row in rows {
+            let assetID: String = row["asset_id"]
+            let oldRelative: String = row["old_relative"]
+            let filename: String = row["filename"]
+            let sidecarPath: String = row["sidecar_path"]
+
+            // The sidecar bundle folder is the parent of the .md file.
+            // The canonical PDF/PNG/JPG companion lives inside the
+            // same folder using the bundle's base filename — i.e.
+            // whatever `original_filename` already records.
+            let bundleFolder = (sidecarPath as NSString).deletingLastPathComponent
+            let newRelative = "\(bundleFolder)/\(filename)"
+            let newAbsolute = workspaceRoot.appendingPathComponent(newRelative)
+            let oldAbsolute = workspaceRoot.appendingPathComponent(oldRelative)
+
+            guard fm.fileExists(atPath: newAbsolute.path) else {
+                os_log(
+                    .default,
+                    log: OSLog(subsystem: "Keystone", category: "Boot"),
+                    "v34 skip asset %{public}@: bundle file missing at %{public}@",
+                    assetID, newRelative
+                )
+                skipped += 1
+                continue
+            }
+
+            try db.execute(
+                sql: """
+                    UPDATE assets
+                    SET relative_path = ?,
+                        stored_filename = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                """,
+                arguments: [newRelative, filename, now, assetID]
+            )
+            // Best-effort: drop the duplicate copy. iCloud may still
+            // be uploading; failures here aren't fatal — the file just
+            // stays orphaned and falls out via the next per-folder
+            // prune below or the cleanup-orphans pass.
+            try? fm.removeItem(at: oldAbsolute)
+            relocated += 1
+        }
+
+        // Prune any now-empty `Assets/Vehicle Maintenance/<…>/` folders
+        // (and the parent dir if it's empty after that). Same
+        // best-effort posture as `cleanupOrphansV12`.
+        let vmAssetsRoot = workspaceRoot
+            .appendingPathComponent("Assets", isDirectory: true)
+            .appendingPathComponent("Vehicle Maintenance", isDirectory: true)
+        AssetPathing.pruneAllEmptyFolders(under: vmAssetsRoot)
+        if let entries = try? fm.contentsOfDirectory(atPath: vmAssetsRoot.path),
+           entries.allSatisfy({ $0 == ".DS_Store" }) {
+            try? fm.removeItem(at: vmAssetsRoot)
+        }
+
+        os_log(
+            .default,
+            log: OSLog(subsystem: "Keystone", category: "Boot"),
+            "v34 relocateVehicleMaintenanceAssetsInPlace: relocated=%d skipped=%d",
+            relocated, skipped
+        )
+    }
+
+    /// v33: add `sidecar_path` to the records table so any record
+    /// originated from (or paired with) an on-disk markdown file can
+    /// be kept in sync with its source. The column stores a path
+    /// relative to `AppDatabase.workspaceFolder` (so the value
+    /// survives workspace relocation) — `nil` means "no sidecar."
+    ///
+    /// Used by the Local-First Sync subsystem: any DB write to a
+    /// record that has a sidecar_path triggers a re-emit of the
+    /// markdown file from the current DB state. Bidirectional sync
+    /// — external edits flow back via the InboxWatcher / re-import
+    /// path — keeps the Finder-visible files and the in-app data
+    /// from drifting.
+    static func addSidecarPathV33(_ db: Database) throws {
+        // ALTER TABLE ADD COLUMN with a nullable TEXT column is safe
+        // and instantaneous — SQLite stores it as a sparse column.
+        // Idempotent guard for re-applies (PRAGMA returns the
+        // existing schema before / after the migration ran).
+        let existing = try Row.fetchAll(db, sql: "PRAGMA table_info(records)")
+        let hasColumn = existing.contains { ($0["name"] as String?) == "sidecar_path" }
+        guard !hasColumn else { return }
+        try db.execute(sql: "ALTER TABLE records ADD COLUMN sidecar_path TEXT")
+    }
+
+    /// v32: seed Service Catalog rows for the 2006 GMC Canyon so its
+    /// maintenance records can carry `services` links the same way the
+    /// Hondas do. Hand-authored intervals (real manual not available);
+    /// the rows are user-editable.
+    ///
+    /// Idempotent: `seedGMCCatalogRows` uses INSERT OR IGNORE on stable
+    /// IDs, and the applies_to_vehicles relation is created with INSERT
+    /// OR IGNORE against the v30 unique-constraint replacement indexes.
+    static func seedGMCCatalogV32(_ db: Database) throws {
+        try seedGMCCatalogRows(db)
+    }
+
+    /// Idempotent insertion of the GMC Canyon catalog rows. Called from
+    /// the v32 migration (existing workspaces) and from
+    /// `Seed.runIfEmpty` (fresh installs, where v32 runs before the
+    /// workspace exists and exits early). Vehicle links resolve by
+    /// record title; missing vehicles are silently skipped.
+    static func seedGMCCatalogRows(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let dbExists = (try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM databases WHERE id = 'service_catalog'"
+        ) ?? 0) > 0
+        guard dbExists else { return }
+
+        for item in GMCMaintenanceSchedule.catalogRows {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO records
+                        (id, database_id, title, glyph, tone, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    item.id, "service_catalog", item.title,
+                    makeGlyph(from: item.title), "iris", now, now, item.sort
+                ]
+            )
+            try setCatalogPropertyValue(db, recordID: item.id, key: "subject_kind", text: "vehicle", now: now)
+            if let miles = item.intervalMiles {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "interval_miles", number: Double(miles), now: now)
+            }
+            if let months = item.intervalMonths {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "interval_months", number: Double(months), now: now)
+            }
+            if let notes = item.notes, !notes.isEmpty {
+                try setCatalogPropertyValue(db, recordID: item.id, key: "notes", text: notes, now: now)
+            }
+            for vehicleTitle in item.vehicleTitles {
+                if let vehicleID = try String.fetchOne(
+                    db,
+                    sql: "SELECT id FROM records WHERE database_id = 'vehicles' AND LOWER(title) = LOWER(?) LIMIT 1",
+                    arguments: [vehicleTitle]
+                ) {
+                    try db.execute(
+                        sql: """
+                            INSERT OR IGNORE INTO relations
+                                (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                            VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                        """,
+                        arguments: [
+                            UUID().uuidString, item.id, vehicleID,
+                            "service_catalog.applies_to_vehicles", now, now
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
+    /// v31: rename the `vehicle_maintenance.services_performed`
+    /// property to `vehicle_maintenance.services` so it matches the
+    /// `services:` key used in sidecar YAML frontmatter. Without this
+    /// rename the InboxImporter looks up the property by its YAML
+    /// key (`services`), finds nothing, and silently drops the value
+    /// — every imported maintenance record ends up with an empty
+    /// services list.
+    ///
+    /// Existing relations rows referencing the old `property_id`
+    /// (`vehicle_maintenance.services_performed`) get re-pointed to
+    /// the new property id. property_values rows get the same
+    /// treatment, though we don't expect any to exist for relation
+    /// properties.
+    static func renameServicesPerformedV31(_ db: Database) throws {
+        let oldID = "vehicle_maintenance.services_performed"
+        let newID = "vehicle_maintenance.services"
+
+        // No-op if the rename already happened (fresh installs come
+        // up with the new key directly via Seed/v28).
+        let oldExists = (try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM properties WHERE id = ?",
+            arguments: [oldID]
+        ) ?? 0) > 0
+        guard oldExists else { return }
+
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        // Detach FKs first by re-pointing rows away from the old
+        // property id.  property_values uses an `id` of "<recordID>.<propertyKey>"
+        // so the re-key has to update its primary key too.
+        try db.execute(
+            sql: """
+                UPDATE property_values
+                SET property_id = ?,
+                    id = REPLACE(id, '.services_performed', '.services'),
+                    updated_at = ?
+                WHERE property_id = ?
+            """,
+            arguments: [newID, now, oldID]
+        )
+        try db.execute(
+            sql: "UPDATE relations SET property_id = ?, updated_at = ? WHERE property_id = ?",
+            arguments: [newID, now, oldID]
+        )
+        try db.execute(
+            sql: """
+                UPDATE properties
+                SET id = ?, key = 'services', updated_at = ?
+                WHERE id = ?
+            """,
+            arguments: [newID, now, oldID]
+        )
+    }
+
+    /// v30: drop the unique indexes that v27 added on `relations`.
+    /// SQLiteData's `SyncEngine` rejects synchronized tables that
+    /// carry uniqueness constraints (it would have to second-guess
+    /// row-level conflict resolution), and that rejection bricks
+    /// CloudKit sync entirely — every boot reports `SchemaError(
+    /// reason: …uniquenessConstraint)` and the engine refuses to
+    /// initialize. Dedupe enforcement moves back to the application
+    /// layer:
+    ///   1. `DBWrites.addRelation` already does a find-or-insert on
+    ///      every call (was originally added in v27), so user-driven
+    ///      writes won't create duplicates.
+    ///   2. `DBWrites.dedupeRelations` runs every boot from
+    ///      AppDatabase as a self-heal in case CloudKit replicates
+    ///      conflicting inserts from another device.
+    /// Non-unique indexes stay in place so the dedupe SELECT and the
+    /// `addRelation` lookup are still O(log n).
+    static func dropRelationUniqueIndexesV30(_ db: Database) throws {
+        try db.execute(sql: "DROP INDEX IF EXISTS uniq_relations_bound")
+        try db.execute(sql: "DROP INDEX IF EXISTS uniq_relations_unbound")
+
+        // Run the same dedupe SQL v27 used. Defensive — v27 already
+        // ran this once, but if CloudKit replicated duplicate rows
+        // back to this device any time after v27 (and before the
+        // unique index started rejecting them), they're still here.
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NOT NULL
+                GROUP BY source_record_id, target_record_id, property_id
+            )
+            AND property_id IS NOT NULL
+        """)
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NULL
+                GROUP BY source_record_id, target_record_id
+            )
+            AND property_id IS NULL
+        """)
+
+        // Replace the dropped unique indexes with regular ones so the
+        // application-level lookups in `addRelation` and the boot-time
+        // dedupe pass stay fast.
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS idx_relations_bound
+            ON relations(source_record_id, target_record_id, property_id)
+            WHERE property_id IS NOT NULL
+        """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS idx_relations_unbound
+            ON relations(source_record_id, target_record_id)
+            WHERE property_id IS NULL
+        """)
+    }
+
+    /// v29: drop the Severe Conditions catalog rows and re-title the
+    /// remaining rows so neither "(Normal)" nor "(Severe)" appears.
+    /// We're not differentiating driving severity — every Honda in
+    /// this workspace follows the Normal Conditions schedule. The
+    /// `-normal` suffix on stable IDs stays for backward compatibility
+    /// with already-tagged sidecars.
+    ///
+    /// Idempotent — re-running deletes nothing further (no rows match
+    /// the severe pattern any more) and the title-rewrite UPDATEs are
+    /// no-ops once applied.
+    static func dropSevereCatalogRowsV29(_ db: Database) throws {
+        // Schema-FK-cascade handles property_values + relations when
+        // their owner record is removed.
+        try db.execute(sql: """
+            DELETE FROM records
+            WHERE database_id = 'service_catalog'
+              AND id LIKE '%-severe%'
+        """)
+
+        // Rewrite the existing v28 titles to drop the "(Normal)" /
+        // " (Normal)" suffix the seed used to emit. We rename in place
+        // rather than blowing the rows away, so any links the user
+        // already made to a normal-row stick.
+        let renames: [(id: String, title: String)] = HondaMaintenanceSchedule.catalogRows
+            .map { ($0.id, $0.title) }
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        for r in renames {
+            try db.execute(
+                sql: """
+                    UPDATE records
+                    SET title = ?, updated_at = ?
+                    WHERE id = ? AND database_id = 'service_catalog'
+                """,
+                arguments: [r.title, now, r.id]
+            )
+        }
+
+        // The schedule_severity property remains on the catalog
+        // schema (a future feature might use it again) but every
+        // value gets cleared since we no longer mean anything by
+        // "normal" vs "severe."
+        try db.execute(sql: """
+            DELETE FROM property_values
+            WHERE property_id = 'service_catalog.schedule_severity'
         """)
     }
 }

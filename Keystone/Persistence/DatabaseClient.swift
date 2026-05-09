@@ -22,6 +22,10 @@ struct DatabaseClient: Sendable {
     var updateRecordTitle: @Sendable (_ recordID: String, _ title: String) throws -> Void
     var updatePropertyValue: @Sendable (_ recordID: String, _ key: String, _ value: String) throws -> Void
     var deleteRecord: @Sendable (_ recordID: String) throws -> Void
+    /// Hard-delete every record in `databaseID` plus their on-disk
+    /// asset files. Returns (recordCount, assetCount) so the caller
+    /// can surface a precise summary in confirmation UI.
+    var deleteAllRecordsInDatabase: @Sendable (_ databaseID: String) throws -> (deletedRecords: Int, deletedAssets: Int)
     var changeRecordDatabase: @Sendable (_ recordID: String, _ newDatabaseID: String) throws -> Void
     /// Persist a column-alignment override on a property's `config_json`.
     /// Pass `nil` to clear and fall back to the type-aware default.
@@ -89,6 +93,7 @@ extension DatabaseClient: DependencyKey {
         updateRecordTitle: { id, title in try dbWrite { try DBWrites.updateRecordTitle($0, recordID: id, title: title) } },
         updatePropertyValue: { id, key, value in try dbWrite { try DBWrites.updatePropertyValue($0, recordID: id, propertyKey: key, value: value) } },
         deleteRecord:    { id in try dbWrite { try DBWrites.deleteRecord($0, recordID: id) } },
+        deleteAllRecordsInDatabase: { dbID in try dbWrite { try DBWrites.deleteAllRecordsInDatabase($0, databaseID: dbID) } },
         changeRecordDatabase: { id, newDB in try dbWrite { try DBWrites.changeRecordDatabase($0, recordID: id, newDatabaseID: newDB) } },
         setPropertyAlignment: { propID, alignment in try dbWrite { try DBWrites.setPropertyAlignment($0, propertyID: propID, alignment: alignment) } },
         blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id) } },
@@ -109,7 +114,7 @@ extension DatabaseClient: DependencyKey {
         detachTag:       { recID, tagID in try dbWrite { try DBWrites.detachTag($0, recordID: recID, tagID: tagID) } },
 
         assetsForRecord: { id in try dbRead { try AssetReads.assets($0, recordID: id) } },
-        importAsset:     { url, recID, wsID in try dbWrite { try AssetImporter.importFile($0, fileURL: url, recordID: recID, workspaceID: wsID) } },
+        importAsset:     { url, recID, wsID in try dbWrite { try AssetImporter.attachFile($0, fileURL: url, recordID: recID, workspaceID: wsID) } },
         deleteAsset:     { id in try dbWrite { try DBWrites.deleteAsset($0, assetID: id) } },
 
         importCoverImage: { url, recID, wsID in try dbWrite { try DBWrites.importCoverImage($0, fileURL: url, recordID: recID, workspaceID: wsID) } },

@@ -12,35 +12,21 @@ private let bootstrapLog = Logger(subsystem: "Keystone", category: "Boot")
 nonisolated(unsafe) var keystoneSyncEngineConfigured: Bool = false
 
 extension DependencyValues {
-    /// Open the Keystone database **for CLI use** — without running
-    /// migrations, seed, backfills, cleanup sweeps, or attaching the
-    /// CloudKit sync engine. Suitable for short-lived processes that need
-    /// to read or write the live workspace while the GUI app is running.
+    /// Open the Keystone database **for CLI use**. Same path resolution,
+    /// migrations, seed, and boot-time backfills as the GUI bootstrap —
+    /// what's omitted is the CloudKit `SyncEngine` (CLI is short-lived
+    /// and the GUI app, when running, owns the sync session).
     ///
-    /// Critical: sets `busy_timeout` so the CLI waits politely for the
-    /// app's write transactions instead of failing immediately with
-    /// `database is locked`. Bypasses the heavy boot-pass logic (which
-    /// the running app has already performed) so two writers don't race
-    /// over migrations or cleanup.
+    /// Schema correctness is non-negotiable: a CLI binary newer than
+    /// the on-disk DB must apply its own migrations before doing
+    /// anything, otherwise every property/relation reference can break
+    /// with FK violations the moment the schema diverges. GRDB's
+    /// `migrator.migrate()` is idempotent — concurrent calls from a
+    /// running GUI just no-op against already-applied versions —
+    /// and the 10-second `busy_timeout` set inside `make()` keeps
+    /// the two writers cooperative.
     mutating func bootstrapKeystoneDatabaseForCLI() throws {
-        let fm = FileManager.default
-        let dbFolder = AppDatabase.databaseFolder
-        if !fm.fileExists(atPath: dbFolder.path) {
-            try fm.createDirectory(at: dbFolder, withIntermediateDirectories: true)
-        }
-        let url = dbFolder.appendingPathComponent("workspace.sqlite")
-
-        var config = Configuration()
-        config.foreignKeysEnabled = true
-        // Wait up to 10s for the GUI app to release a write lock before
-        // giving up. The app holds locks only for the duration of a
-        // single write transaction, which is milliseconds in practice.
-        config.busyMode = .timeout(10)
-
-        let writer: any DatabaseWriter = try SQLiteData.defaultDatabase(
-            path: url.path,
-            configuration: config
-        )
+        let writer = try AppDatabase.make()
         defaultDatabase = writer
         keystoneSyncEngineConfigured = false
     }

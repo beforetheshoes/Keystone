@@ -41,6 +41,7 @@ enum Seed {
             DBSeed(key: "maintenance", name: "Maintenance",    plural: "Maintenance",   icon: "M",  accent: "sage",     area: "area-home",     defaultView: "list",      sort: 3),
             DBSeed(key: "vehicles",    name: "Vehicles",       plural: "Vehicles",      icon: "V",  accent: "iris",     area: "area-mobility", defaultView: "table",     sort: 4),
             DBSeed(key: "vehicle_maintenance", name: "Vehicle Maintenance", plural: "Vehicle Maintenance", icon: "VM", accent: "iris", area: "area-mobility", defaultView: "table", sort: 4.5),
+            DBSeed(key: "service_catalog", name: "Service Catalog", plural: "Service Catalog", icon: "SC", accent: "iris", area: "area-mobility", defaultView: "list", sort: 4.6),
             DBSeed(key: "vendors",     name: "Vendors",        plural: "Vendors",       icon: "Vn", accent: "graphite", area: "area-records",  defaultView: "table",     sort: 4.7),
             DBSeed(key: "documents",   name: "Documents",      plural: "Documents",     icon: "D",  accent: "cerulean", area: "area-records",  defaultView: "table",     sort: 5),
             DBSeed(key: "events",      name: "Events & Trips", plural: "Events & Trips",icon: "E",  accent: "amber",    area: "area-plans",    defaultView: "table",     sort: 6),
@@ -92,6 +93,18 @@ enum Seed {
             PropSeed(db: "vehicles", key: "plate",   label: "Plate",   type: "text",   sort: 4),
             PropSeed(db: "vehicles", key: "vin",     label: "VIN",     type: "text",   sort: 5),
             PropSeed(db: "vehicles", key: "mileage", label: "Mileage", type: "number", sort: 6),
+            PropSeed(db: "vehicles", key: "current_mileage",       label: "Current mileage", type: "number", sort: 7.0),
+            PropSeed(db: "vehicles", key: "current_mileage_as_of", label: "As of",           type: "date",   sort: 7.1),
+            // service_catalog
+            PropSeed(db: "service_catalog", key: "name",         label: "Service",           type: "title",    sort: 0),
+            PropSeed(db: "service_catalog", key: "subject_kind", label: "Applies to (kind)", type: "select",   sort: 1),
+            PropSeed(db: "service_catalog", key: "applies_to_vehicles", label: "Vehicles",   type: "relation", sort: 2),
+            PropSeed(db: "service_catalog", key: "interval_miles",  label: "Every (mi)",     type: "number",   sort: 3),
+            PropSeed(db: "service_catalog", key: "interval_months", label: "Every (months)", type: "number",   sort: 4),
+            PropSeed(db: "service_catalog", key: "schedule_severity", label: "Schedule",     type: "select",   sort: 5),
+            PropSeed(db: "service_catalog", key: "stage",        label: "Stage",             type: "select",   sort: 6),
+            PropSeed(db: "service_catalog", key: "predecessor",  label: "After",             type: "relation", sort: 7),
+            PropSeed(db: "service_catalog", key: "notes",        label: "Notes",             type: "text",     sort: 8),
             // vehicle_maintenance
             PropSeed(db: "vehicle_maintenance", key: "name",    label: "Title",   type: "title",    sort: 0),
             PropSeed(db: "vehicle_maintenance", key: "date",    label: "Date",    type: "date",     sort: 1),
@@ -100,6 +113,7 @@ enum Seed {
             PropSeed(db: "vehicle_maintenance", key: "vendor",  label: "Vendor",  type: "relation", sort: 4),
             PropSeed(db: "vehicle_maintenance", key: "mileage", label: "Mileage", type: "number",   sort: 5),
             PropSeed(db: "vehicle_maintenance", key: "cost",    label: "Cost",    type: "number",   sort: 6),
+            PropSeed(db: "vehicle_maintenance", key: "services", label: "Services", type: "relation", sort: 6.5),
             // vendors
             PropSeed(db: "vendors", key: "name",     label: "Name",            type: "title",  sort: 0),
             PropSeed(db: "vendors", key: "kind",     label: "Kind",            type: "select", sort: 1),
@@ -214,6 +228,12 @@ enum Seed {
                 case ("maintenance", "home"):   return #"{"targetDatabaseID":"homes"}"#
                 case ("vehicle_maintenance", "vehicle"): return #"{"targetDatabaseID":"vehicles"}"#
                 case ("vehicle_maintenance", "vendor"):  return #"{"targetDatabaseID":"vendors"}"#
+                case ("vehicle_maintenance", "services"): return #"{"targetDatabaseID":"service_catalog","multi":true}"#
+                case ("service_catalog",     "applies_to_vehicles"): return #"{"targetDatabaseID":"vehicles","multi":true}"#
+                case ("service_catalog",     "predecessor"):         return #"{"targetDatabaseID":"service_catalog"}"#
+                case ("service_catalog",     "subject_kind"):        return #"{"options":["vehicle","home","pet"]}"#
+                case ("service_catalog",     "schedule_severity"):   return #"{"options":["normal","severe"]}"#
+                case ("service_catalog",     "stage"):               return #"{"options":["first","recurring"]}"#
                 case ("activities",     "trip"):         return #"{"targetDatabaseID":"trips"}"#
                 case ("activities",     "organization"): return #"{"targetDatabaseID":"vendors"}"#
                 case ("lodging",        "trip"):         return #"{"targetDatabaseID":"trips"}"#
@@ -246,6 +266,14 @@ enum Seed {
                 arguments: [propID, p.db, p.key, p.label, p.type, configJSON, now, now, p.sort]
             )
         }
+
+        // Service Catalog rows for the Honda Maintenance Schedule.
+        // The v28 migration also seeds these, but on fresh installs
+        // it runs before this workspace exists and exits early — call
+        // again here to cover the cold-start case. Idempotent.
+        try Schema.seedHondaCatalogRows(db)
+        // Same logic for the GMC catalog (v32). Idempotent.
+        try Schema.seedGMCCatalogRows(db)
     }
 
 }

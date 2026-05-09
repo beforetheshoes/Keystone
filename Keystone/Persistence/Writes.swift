@@ -14,13 +14,32 @@ enum DBWrites {
         let tone = dbRow.accent.rawValue
         let nextSort = (try Double.fetchOne(db, sql: "SELECT MAX(sort_index) FROM records WHERE database_id = ?", arguments: [databaseID]) ?? -1) + 1
 
+        // For sidecar-backed databases, mint a workspace-relative path
+        // at creation time so the record participates in bidirectional
+        // sync from the moment it exists. The folder is named after
+        // the recordID (path-safe, stable across rename) and lives
+        // under `Cars/Unknown/` until/unless the user assigns a
+        // vehicle relation. Folder migration on vehicle assignment is
+        // a separate concern and not handled here.
+        let sidecarPath: String? = (databaseID == "vehicle_maintenance")
+            ? "Cars/Unknown/\(id)/\(id).pdf-processed-markdown.md"
+            : nil
+
         try db.execute(
             sql: """
-                INSERT INTO records (id, database_id, title, glyph, tone, created_at, updated_at, sort_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO records (id, database_id, title, glyph, tone, created_at, updated_at, sort_index, sidecar_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            arguments: [id, databaseID, title, glyph, tone, now, now, nextSort]
+            arguments: [id, databaseID, title, glyph, tone, now, now, nextSort, sidecarPath]
         )
+
+        // Materialize the sidecar file immediately so the user sees
+        // it in Finder right after create. Errors inside SidecarWriter
+        // are logged but never thrown — disk failure can't block a
+        // DB write.
+        if sidecarPath != nil {
+            SidecarWriter.writeIfNeeded(db, recordID: id)
+        }
 
         return RecordRow(
             id: id,
@@ -31,6 +50,18 @@ enum DBWrites {
             sortIndex: nextSort,
             values: [:]
         )
+    }
+
+    /// Trigger a sidecar regenerate-and-write for the record affected
+    /// by a block-level mutation. No-op if the block doesn't exist
+    /// or its parent record has no sidecar_path. Errors are logged
+    /// inside `SidecarWriter` and never propagate — DB writes must
+    /// not depend on disk I/O succeeding.
+    private static func sidecarWritebackForBlock(_ db: Database, blockID: String) {
+        guard let recordID = try? String.fetchOne(
+            db, sql: "SELECT record_id FROM blocks WHERE id = ?", arguments: [blockID]
+        ) else { return }
+        SidecarWriter.writeIfNeeded(db, recordID: recordID)
     }
 
     static func updateRecordTitle(_ db: Database, recordID: String, title: String) throws {
@@ -100,6 +131,8 @@ enum DBWrites {
                 // `relative_path` which we haven't touched.
             }
         }
+
+        SidecarWriter.writeIfNeeded(db, recordID: recordID)
     }
 
     static func updatePropertyValue(_ db: Database, recordID: String, propertyKey: String, value: String) throws {
@@ -109,6 +142,10 @@ enum DBWrites {
             JOIN properties p ON p.database_id = r.database_id AND p.key = ?
             WHERE r.id = ?
         """, arguments: [propertyKey, recordID]) else { return }
+        // Sidecar regenerate runs on every successful return path,
+        // including the relation early-returns deeper in this function.
+        // Captured here so the defer fires after all branches finish.
+        defer { SidecarWriter.writeIfNeeded(db, recordID: recordID) }
 
         let propID: String = row["prop_id"]
         let propType: String = row["prop_type"]
@@ -126,8 +163,9 @@ enum DBWrites {
         // exists.
         if propType == "relation" {
             // Always clear prior link state for this (source, property)
-            // first — both real relations and any text fallback. This keeps
-            // the property single-valued from the user's perspective.
+            // first — both real relations and any text fallback. The
+            // call sets the *complete* set of links for this property,
+            // single or multi, so we replace rather than merge.
             try db.execute(
                 sql: "DELETE FROM relations WHERE source_record_id = ? AND property_id = ?",
                 arguments: [recordID, propID]
@@ -145,57 +183,88 @@ enum DBWrites {
                 return
             }
 
-            // Pull targetDatabaseID out of the property's config JSON.
-            let targetDB: String? = {
+            // Parse config — `targetDatabaseID` and the optional
+            // `multi: true` flag.
+            let configObj: [String: Any]? = {
                 guard let data = propConfig.data(using: .utf8),
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-                return obj["targetDatabaseID"] as? String
+                return obj
+            }()
+            let targetDB: String? = configObj?["targetDatabaseID"] as? String
+            let isMulti = (configObj?["multi"] as? Bool) ?? false
+
+            // Determine the candidate list. For a multi-relation
+            // property whose value is a YAML flow list (`[a, b, c]`),
+            // split into individual items; otherwise treat the whole
+            // value as a single candidate.
+            let candidates: [String] = {
+                if isMulti, trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+                    let inner = String(trimmed.dropFirst().dropLast())
+                    return parseRelationFlowList(inner)
+                } else {
+                    return [trimmed]
+                }
             }()
 
             if let targetDB {
-                // Resolve the target by case-insensitive title; if it
-                // doesn't exist, create a stub record in the target
-                // database. This auto-creation is the right behavior
-                // for structured ingestion (Inbox imports of Vehicle
-                // Maintenance with `vehicle: Civic`, frontmatter from
-                // bulk imports, CLI `set-property` calls). Interactive
-                // editing in the UI uses `RecordPickerPopover` which
-                // never hits this code path, so we don't risk creating
-                // garbage records on every keystroke.
-                let targetID: String
-                if let existing = try String.fetchOne(
-                    db,
-                    sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
-                    arguments: [targetDB, trimmed]
-                ) {
-                    targetID = existing
-                } else if let stub = try createRelationTargetStub(
-                    db, databaseID: targetDB, title: trimmed
-                ) {
-                    targetID = stub
-                } else {
-                    // Target database itself doesn't exist — fall through
-                    // to text fallback so a future schema change might
-                    // resolve it.
-                    try storeAsRelationTextFallback(
-                        db, pvID: pvID, recordID: recordID,
-                        propID: propID, value: trimmed, now: now
+                var anyLinked = false
+                for raw in candidates {
+                    let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !candidate.isEmpty else { continue }
+
+                    // Resolve target: try exact ID match first
+                    // (stable seeded IDs like "svc-honda-engine-oil-
+                    // normal" land here), then case-insensitive title,
+                    // then auto-create a stub.
+                    let targetID: String
+                    if let byID = try String.fetchOne(
+                        db,
+                        sql: "SELECT id FROM records WHERE database_id = ? AND id = ? LIMIT 1",
+                        arguments: [targetDB, candidate]
+                    ) {
+                        targetID = byID
+                    } else if let byTitle = try String.fetchOne(
+                        db,
+                        sql: "SELECT id FROM records WHERE database_id = ? AND LOWER(title) = LOWER(?) LIMIT 1",
+                        arguments: [targetDB, candidate]
+                    ) {
+                        targetID = byTitle
+                    } else if let stub = try createRelationTargetStub(
+                        db, databaseID: targetDB, title: candidate
+                    ) {
+                        targetID = stub
+                    } else {
+                        continue
+                    }
+
+                    try db.execute(
+                        sql: """
+                            INSERT INTO relations (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
+                            VALUES (?, ?, ?, 'linked', ?, ?, ?)
+                        """,
+                        arguments: [UUID().uuidString, recordID, targetID, propID, now, now]
+                    )
+                    anyLinked = true
+                }
+
+                if anyLinked {
+                    try db.execute(
+                        sql: "UPDATE records SET updated_at = ? WHERE id = ?",
+                        arguments: [now, recordID]
                     )
                     return
                 }
 
-                let relID = UUID().uuidString
-                try db.execute(
-                    sql: """
-                        INSERT INTO relations (id, source_record_id, target_record_id, relation_type, property_id, created_at, updated_at)
-                        VALUES (?, ?, ?, 'linked', ?, ?, ?)
-                    """,
-                    arguments: [relID, recordID, targetID, propID, now, now]
-                )
-                try db.execute(
-                    sql: "UPDATE records SET updated_at = ? WHERE id = ?",
-                    arguments: [now, recordID]
-                )
+                // Fall through to text fallback only for single-
+                // relation values — for multi-relation imports, an
+                // empty resolution set is just a no-op (nothing to
+                // promote later).
+                if !isMulti {
+                    try storeAsRelationTextFallback(
+                        db, pvID: pvID, recordID: recordID,
+                        propID: propID, value: trimmed, now: now
+                    )
+                }
                 return
             }
 
@@ -280,6 +349,31 @@ enum DBWrites {
             sql: "UPDATE records SET updated_at = ? WHERE id = ?",
             arguments: [now, recordID]
         )
+    }
+
+    /// Split a YAML flow-list body (the part *between* the brackets)
+    /// into its individual items, preserving quotes and respecting
+    /// commas inside them. Returns trimmed, unquoted strings —
+    /// suitable for use as either record IDs or titles.
+    private static func parseRelationFlowList(_ s: String) -> [String] {
+        var out: [String] = []
+        var current = ""
+        var inSingle = false
+        var inDouble = false
+        for ch in s {
+            switch ch {
+            case "'" where !inDouble: inSingle.toggle()
+            case "\"" where !inSingle: inDouble.toggle()
+            case "," where !inSingle && !inDouble:
+                out.append(current); current = ""
+            default:
+                current.append(ch)
+            }
+        }
+        if !current.trimmingCharacters(in: .whitespaces).isEmpty {
+            out.append(current)
+        }
+        return out.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
     /// Create a minimal stub record in `databaseID` titled `title`, used
@@ -378,8 +472,110 @@ enum DBWrites {
         // (sync, FK cascade, migration).
         let title = (try? String.fetchOne(db, sql: "SELECT title FROM records WHERE id = ?", arguments: [recordID])) ?? "?"
         let dbID = (try? String.fetchOne(db, sql: "SELECT database_id FROM records WHERE id = ?", arguments: [recordID])) ?? "?"
+        // Capture the sidecar_path BEFORE the row is gone so we can
+        // remove the corresponding `.md` from disk. Without this, the
+        // file watcher would re-import the orphan file on its next
+        // scan and resurrect the record we just deleted.
+        let sidecarPath = (try? String.fetchOne(
+            db, sql: "SELECT sidecar_path FROM records WHERE id = ?", arguments: [recordID]
+        )) ?? nil
         os_log(.default, log: OSLog(subsystem: "Keystone", category: "Boot"), "deleteRecord %{public}@ (db=%{public}@ title=%{public}@)", recordID, dbID, title)
         try db.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [recordID])
+
+        if let sidecarPath, !sidecarPath.isEmpty {
+            let absolute = AppDatabase.workspaceFolder.appendingPathComponent(sidecarPath)
+            // Forget the hash first so a stray FSEvent on the deletion
+            // can't be misinterpreted as "external edit, hash mismatch
+            // → re-import."
+            SidecarHashCache.shared.forget(absolutePath: absolute.path)
+            try? FileManager.default.removeItem(at: absolute)
+            // Best-effort: prune the empty event folder so the
+            // user's Cars/ tree doesn't accumulate empty husks. The
+            // PDF asset companion was already removed by deleteAsset
+            // upstream of this in the wipe path.
+            let parent = absolute.deletingLastPathComponent()
+            if let entries = try? FileManager.default.contentsOfDirectory(atPath: parent.path),
+               entries.allSatisfy({ $0 == ".DS_Store" }) {
+                try? FileManager.default.removeItem(at: parent)
+            }
+        }
+    }
+
+    /// Hard-delete every record in `databaseID` along with its
+    /// associated asset files on disk. For `vehicle_maintenance`,
+    /// also clears each vehicle's `current_mileage` /
+    /// `current_mileage_as_of` snapshot since those are derived from
+    /// the now-deleted events. Returns counts the caller can surface
+    /// in confirmation UI.
+    ///
+    /// Two-pass disk cleanup: first per-asset (gets the
+    /// AssetPathing-tracked files), then nuke the whole
+    /// `Assets/<sanitized-db-name>/` directory (catches orphans whose
+    /// asset rows drifted from the on-disk path or were never tracked
+    /// via the assets table at all). The whole-folder pass is safe
+    /// because every record in this database is gone — anything left
+    /// under that asset folder is by definition orphaned.
+    @discardableResult
+    static func deleteAllRecordsInDatabase(_ db: Database, databaseID: String) throws -> (deletedRecords: Int, deletedAssets: Int) {
+        // Capture the database NAME before any rows go away — the
+        // sanitized form is the on-disk folder name we'll need to
+        // remove. Looked up once and held over the deletion span.
+        let dbName = try String.fetchOne(
+            db,
+            sql: "SELECT name FROM databases WHERE id = ?",
+            arguments: [databaseID]
+        )
+
+        let assetIDs = try String.fetchAll(
+            db,
+            sql: """
+                SELECT a.id FROM assets a
+                JOIN records r ON r.id = a.record_id
+                WHERE r.database_id = ?
+            """,
+            arguments: [databaseID]
+        )
+        for assetID in assetIDs {
+            try deleteAsset(db, assetID: assetID)
+        }
+
+        let recordIDs = try String.fetchAll(
+            db,
+            sql: "SELECT id FROM records WHERE database_id = ?",
+            arguments: [databaseID]
+        )
+        for recordID in recordIDs {
+            try deleteRecord(db, recordID: recordID)
+        }
+
+        // Catch any orphan files left under this database's asset
+        // folder. After deleting every record, that folder *should*
+        // be empty (or gone) — anything still there is leftover from
+        // an asset row whose path drifted, an aborted import, or a
+        // file dropped in by hand. Best-effort: failures (iCloud
+        // upload-in-progress, permissions) don't block the rest of
+        // the deletion.
+        if let dbName, !dbName.isEmpty {
+            let dbDir = AssetPathing.sanitize(dbName)
+            let folder = AppDatabase.workspaceFolder
+                .appendingPathComponent("Assets", isDirectory: true)
+                .appendingPathComponent(dbDir, isDirectory: true)
+            if FileManager.default.fileExists(atPath: folder.path) {
+                try? FileManager.default.removeItem(at: folder)
+            }
+        }
+
+        if databaseID == "vehicle_maintenance" {
+            try db.execute(sql: """
+                DELETE FROM property_values
+                WHERE property_id IN (
+                    'vehicles.current_mileage',
+                    'vehicles.current_mileage_as_of'
+                )
+            """)
+        }
+
+        return (recordIDs.count, assetIDs.count)
     }
 
     /// Sweep records that have a `.md` asset attached but no editor
@@ -674,6 +870,7 @@ enum DBWrites {
             """,
             arguments: [id, recordID, BlockKind.table.rawValue, json, sortIndex, now, now]
         )
+        SidecarWriter.writeIfNeeded(db, recordID: recordID)
         return BlockRow(
             id: id,
             recordID: recordID,
@@ -739,7 +936,7 @@ enum DBWrites {
             """,
             arguments: [id, recordID, kind.rawValue, json, sortIndex, now, now]
         )
-
+        SidecarWriter.writeIfNeeded(db, recordID: recordID)
         return BlockRow(id: id, recordID: recordID, kind: kind, text: text, checked: checked, sortIndex: sortIndex)
     }
 
@@ -753,6 +950,7 @@ enum DBWrites {
             sql: "UPDATE blocks SET content_json = ?, updated_at = ? WHERE id = ?",
             arguments: [json, now, blockID]
         )
+        sidecarWritebackForBlock(db, blockID: blockID)
     }
 
     static func updateBlockKind(_ db: Database, blockID: String, kind: BlockKind, text: AttributedString? = nil) throws {
@@ -772,6 +970,7 @@ enum DBWrites {
                 arguments: [kind.rawValue, now, blockID]
             )
         }
+        sidecarWritebackForBlock(db, blockID: blockID)
     }
 
     /// Replace a `.table` block's tabular payload. The block's `text`
@@ -785,6 +984,7 @@ enum DBWrites {
             sql: "UPDATE blocks SET content_json = ?, updated_at = ? WHERE id = ?",
             arguments: [json, now, blockID]
         )
+        sidecarWritebackForBlock(db, blockID: blockID)
     }
 
     static func updateBlockChecked(_ db: Database, blockID: String, checked: Bool) throws {
@@ -796,10 +996,17 @@ enum DBWrites {
             sql: "UPDATE blocks SET content_json = ?, updated_at = ? WHERE id = ?",
             arguments: [json, now, blockID]
         )
+        sidecarWritebackForBlock(db, blockID: blockID)
     }
 
     static func deleteBlock(_ db: Database, blockID: String) throws {
+        // Capture the parent record_id BEFORE the delete so we can
+        // still find it for the sidecar regenerate.
+        let recordID = try String.fetchOne(
+            db, sql: "SELECT record_id FROM blocks WHERE id = ?", arguments: [blockID]
+        )
         try db.execute(sql: "DELETE FROM blocks WHERE id = ?", arguments: [blockID])
+        if let recordID { SidecarWriter.writeIfNeeded(db, recordID: recordID) }
     }
 
     // MARK: - Tags
@@ -871,6 +1078,39 @@ enum DBWrites {
     }
 
     static func addRelation(_ db: Database, sourceRecordID: String, targetRecordID: String, propertyID: String?) throws -> RelationLink? {
+        defer { SidecarWriter.writeIfNeeded(db, recordID: sourceRecordID) }
+        // Find-or-insert: the relations table now carries partial
+        // unique indexes (v27) on (source, target, property) and
+        // (source, target) for the unbound case. Surface that as a
+        // first-class behavior here — return the existing link rather
+        // than letting INSERT fail with a constraint violation. This
+        // also makes the code path idempotent for sync replays.
+        let existingID: String?
+        if let propertyID {
+            existingID = try String.fetchOne(
+                db,
+                sql: """
+                    SELECT id FROM relations
+                    WHERE source_record_id = ? AND target_record_id = ? AND property_id = ?
+                    LIMIT 1
+                """,
+                arguments: [sourceRecordID, targetRecordID, propertyID]
+            )
+        } else {
+            existingID = try String.fetchOne(
+                db,
+                sql: """
+                    SELECT id FROM relations
+                    WHERE source_record_id = ? AND target_record_id = ? AND property_id IS NULL
+                    LIMIT 1
+                """,
+                arguments: [sourceRecordID, targetRecordID]
+            )
+        }
+        if let existingID {
+            return try RelationReads.link(db, relationID: existingID)
+        }
+
         let id = UUID().uuidString
         let now = AppDatabase.isoFormatter.string(from: Date())
         try db.execute(
@@ -884,10 +1124,57 @@ enum DBWrites {
     }
 
     static func removeRelation(_ db: Database, relationID: String) throws {
+        let sourceID = try String.fetchOne(
+            db,
+            sql: "SELECT source_record_id FROM relations WHERE id = ?",
+            arguments: [relationID]
+        )
         try db.execute(sql: "DELETE FROM relations WHERE id = ?", arguments: [relationID])
+        if let sourceID { SidecarWriter.writeIfNeeded(db, recordID: sourceID) }
+    }
+
+    /// Collapse duplicate `relations` rows. Two flavors of dup:
+    ///   1. Property-bound: same (source, target, property) triple.
+    ///   2. Property-unbound: same (source, target) pair with NULL
+    ///      property (free-form "Related" links from the detail view).
+    /// Keeps the row with the smallest rowid (oldest insert) in each
+    /// duplicate group. Returns the number of rows deleted.
+    ///
+    /// We can't enforce uniqueness with a SQLite index because
+    /// SQLiteData's `SyncEngine` refuses to initialize against
+    /// synchronized tables that carry uniqueness constraints. Instead,
+    /// `addRelation` does a find-or-insert on every call and the boot
+    /// path runs this dedupe to clean up anything CloudKit replicated
+    /// in from another device.
+    @discardableResult
+    static func dedupeRelations(_ db: Database) throws -> Int {
+        let beforeCount = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM relations") ?? 0)
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NOT NULL
+                GROUP BY source_record_id, target_record_id, property_id
+            )
+            AND property_id IS NOT NULL
+        """)
+        try db.execute(sql: """
+            DELETE FROM relations
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM relations
+                WHERE property_id IS NULL
+                GROUP BY source_record_id, target_record_id
+            )
+            AND property_id IS NULL
+        """)
+        let afterCount = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM relations") ?? 0)
+        return beforeCount - afterCount
     }
 
     static func removeRelationByEndpoints(_ db: Database, sourceRecordID: String, targetRecordID: String, propertyID: String?) throws {
+        defer { SidecarWriter.writeIfNeeded(db, recordID: sourceRecordID) }
         if let propertyID {
             try db.execute(
                 sql: "DELETE FROM relations WHERE source_record_id = ? AND target_record_id = ? AND property_id = ?",

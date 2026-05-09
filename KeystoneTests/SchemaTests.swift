@@ -4,20 +4,12 @@ import CryptoKit
 @testable import Keystone
 
 final class SchemaTests: XCTestCase {
-    /// Run a test body with the live Keystone database set up. `withDependencies`
-    /// is scoped (works reliably in XCTestCase). `DatabaseClient.liveValue`
-    /// captures `@Dependency(\.defaultDatabase)` lazily, so as long as we wrap
-    /// the body, the closures see the right writer.
+    /// Run a test body with the live Keystone database set up against
+    /// a per-test temp workspace folder. See `withHermeticDB` for the
+    /// rationale — without the workspace override, tests would write
+    /// to the user's real `~/Library/Application Support/Keystone/`.
     func withDB<T>(_ body: () throws -> T) rethrows -> T {
-        try withDependencies { values in
-            do {
-                try values.bootstrapKeystoneDatabase(configureSyncEngine: false)
-            } catch {
-                XCTFail("Bootstrap failed: \(error)")
-            }
-        } operation: {
-            try body()
-        }
+        try withHermeticDB(body)
     }
 
 

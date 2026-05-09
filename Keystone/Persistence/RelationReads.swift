@@ -16,12 +16,21 @@ struct RelationLink: Equatable, Sendable, Identifiable {
 
 enum RelationReads {
     /// Outgoing relations FROM `recordID`. Optionally filtered by relation property.
+    ///
+    /// **Read-time dedup**: collapses duplicate (source, target, property)
+    /// triples (and the property-unbound (source, target) variant) by
+    /// keeping the smallest `relations.id` per group. Defense-in-depth
+    /// against CloudKit replicating the same logical link from another
+    /// device — the dedupe boot pass cleans this up at startup, but a
+    /// real-time sync push during the session can briefly produce
+    /// duplicates that the UI shouldn't render twice.
     static func outgoing(_ db: Database, recordID: String, propertyID: String? = nil) throws -> [RelationLink] {
         let sql: String
         let args: StatementArguments
         if let propertyID {
             sql = """
-                SELECT r.id AS relID, r.source_record_id, r.target_record_id, r.property_id,
+                SELECT MIN(r.id) AS relID,
+                       r.source_record_id, r.target_record_id, r.property_id,
                        p.name AS prop_name,
                        t.title, t.glyph, t.tone, t.database_id,
                        d.name AS db_name
@@ -30,12 +39,14 @@ enum RelationReads {
                 JOIN databases d ON d.id = t.database_id
                 LEFT JOIN properties p ON p.id = r.property_id
                 WHERE r.source_record_id = ? AND r.property_id = ?
+                GROUP BY r.source_record_id, r.target_record_id, r.property_id
                 ORDER BY t.title COLLATE NOCASE
             """
             args = [recordID, propertyID]
         } else {
             sql = """
-                SELECT r.id AS relID, r.source_record_id, r.target_record_id, r.property_id,
+                SELECT MIN(r.id) AS relID,
+                       r.source_record_id, r.target_record_id, r.property_id,
                        p.name AS prop_name,
                        t.title, t.glyph, t.tone, t.database_id,
                        d.name AS db_name
@@ -44,6 +55,8 @@ enum RelationReads {
                 JOIN databases d ON d.id = t.database_id
                 LEFT JOIN properties p ON p.id = r.property_id
                 WHERE r.source_record_id = ?
+                GROUP BY r.source_record_id, r.target_record_id,
+                         COALESCE(r.property_id, '__unbound__')
                 ORDER BY d.sort_index, t.title COLLATE NOCASE
             """
             args = [recordID]

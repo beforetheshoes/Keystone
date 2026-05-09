@@ -75,6 +75,10 @@ struct Record: Identifiable, Equatable, Sendable {
     @Column("archived_at") var archivedAt: String?
     @Column("deleted_at") var deletedAt: String?
     @Column("sort_index") var sortIndex: Double
+    /// Workspace-relative path to the markdown sidecar this record
+    /// is mirrored to (added in migration v33). `nil` for records
+    /// that have no on-disk twin.
+    @Column("sidecar_path") var sidecarPath: String?
 }
 
 @Table("property_values")

@@ -29,6 +29,7 @@ enum HelpTopics {
         .init(id: "18-enrichment",             title: "Enrichment & API keys"),
         .init(id: "19-calendar",               title: "Calendar"),
         .init(id: "20-collections",            title: "Collections"),
+        .init(id: "21-maintenance-scheduling", title: "Maintenance scheduling"),
     ]
 
     static let defaultTopicID = "01-welcome"

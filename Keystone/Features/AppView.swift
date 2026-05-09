@@ -76,6 +76,15 @@ private struct MacMainPane: View {
             TagFilterView(store: store)
         case let .help(topic):
             HelpView(store: store, topicID: topic)
+        case .maintenanceSchedule:
+            MaintenanceScheduleView(
+                onOpenRecord: { databaseID, recordID in
+                    store.send(.setNav(.record(databaseID: databaseID, recordID: recordID)))
+                },
+                onLogService: { vehicleID in
+                    store.send(.logServiceForVehicle(vehicleID: vehicleID))
+                }
+            )
         }
     }
 }
