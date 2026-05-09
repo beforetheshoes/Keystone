@@ -304,6 +304,9 @@ enum AppDatabase {
         migrator.registerMigration("v25-flip-address-type") { db in
             try Schema.flipAddressPropertiesV25(db)
         }
+        migrator.registerMigration("v26-travel-direct-addresses") { db in
+            try Schema.seedTravelAddressesV26(db)
+        }
         migrator.registerMigration("v16-relocate-assets") { db in
             try Schema.relocateAssetsV16(db)
         }

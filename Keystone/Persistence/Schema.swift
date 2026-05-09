@@ -1020,10 +1020,12 @@ enum Schema {
     }
 
     /// v25: flip the two text-typed `address` properties (`vendors.address`
-    /// and `homes.address`) to the new `address` PropertyType. Addresses
-    /// in other databases (activities, lodging, transportation,
-    /// restaurants) flow via the `vendor`/`organization` relation rather
-    /// than a top-level address column, so they're not flipped.
+    /// and `homes.address`) to the new `address` PropertyType. At the time
+    /// this migration shipped, addresses on activities/lodging/transportation/
+    /// restaurants flowed via the `vendor`/`organization` relation. v26
+    /// later added direct `address` properties to activities and lodging
+    /// to power the Trip detail route map (issue #8); see
+    /// `seedTravelAddressesV26`.
     ///
     /// Idempotent — `WHERE … type = 'text'` makes the UPDATE a no-op
     /// once flipped. Existing values in `property_values` are left
@@ -1036,6 +1038,36 @@ enum Schema {
             try db.execute(
                 sql: "UPDATE properties SET type = 'address', updated_at = ? WHERE id = ? AND type = 'text'",
                 arguments: [now, id]
+            )
+        }
+    }
+
+    /// v26: add direct `address` properties to `activities` and `lodging`,
+    /// powering the Trip detail route map. The original Travel area
+    /// (v22) deferred addresses to the linked vendor; the bespoke Trip
+    /// detail UI (issue #8) needs per-record pins so each activity/
+    /// lodging stop can carry its own structured address regardless of
+    /// whether a vendor record exists.
+    ///
+    /// Idempotent — `INSERT OR IGNORE` follows the same reseed-on-known-
+    /// keys idiom as v22 / v24. Skips fresh installs because
+    /// `Seed.runIfEmpty` writes the same rows from a single source of
+    /// truth on first launch.
+    static func seedTravelAddressesV26(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        struct P { let db: String; let key: String; let label: String; let sort: Double }
+        let props: [P] = [
+            .init(db: "activities", key: "address", label: "Address", sort: 4.5),
+            .init(db: "lodging",    key: "address", label: "Address", sort: 4.5),
+        ]
+        for p in props {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, 'address', '{}', 0, 0, ?, ?, ?)
+                """,
+                arguments: ["\(p.db).\(p.key)", p.db, p.key, p.label, now, now, p.sort]
             )
         }
     }

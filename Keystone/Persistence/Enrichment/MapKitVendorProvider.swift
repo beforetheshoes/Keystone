@@ -9,11 +9,34 @@ import MapKit
 /// in-detail lookup sheet handles those interactively), and only blank
 /// fields get written.
 @available(iOS 26.0, macOS 26.0, *)
-struct MapKitVendorProvider: EnrichmentProvider {
+struct MapKitVendorProvider: EnrichmentProvider, LookupProvider {
     let databaseKey = "vendors"
     let triggerPropertyKey = "place_id"
 
     func isAvailable() async -> Bool { true }
+
+    func searchCandidates(query: String) async -> [LookupCandidate] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = trimmed
+        request.resultTypes = [.pointOfInterest]
+        let search = MKLocalSearch(request: request)
+        guard let response = try? await search.start() else { return [] }
+        return response.mapItems.prefix(10).compactMap { item in
+            guard let placeID = item.identifier?.rawValue else { return nil }
+            let enrichment = VendorLookupService.extract(from: item)
+            let apply = Self.apply(from: enrichment)
+            let displayName = item.name ?? trimmed
+            return LookupCandidate(
+                id: placeID,
+                title: displayName,
+                subtitle: enrichment.address ?? enrichment.locality,
+                coverURL: nil,
+                apply: apply
+            )
+        }
+    }
 
     func enrich(record: EnrichmentRecord) async -> EnrichmentResult {
         let address = record.propertyValues["address"]

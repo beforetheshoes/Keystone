@@ -1,13 +1,34 @@
 import Foundation
 
 /// Fills in `tmdb_id`, `first_air_date`, `season_count`, `episode_count`,
-/// `overview`, and the poster for TV-show records. Requires a TMDB v4
-/// read-access token (Settings → API Keys → TMDB).
-struct TMDBTVProvider: EnrichmentProvider {
+/// `overview`, and the poster for TV-show records. Requires a TMDB
+/// credential — either the v3 API key or the v4 read-access token works
+/// (Settings → API Keys → TMDB).
+struct TMDBTVProvider: EnrichmentProvider, LookupProvider {
     let databaseKey = "tv_shows"
     let triggerPropertyKey = "tmdb_id"
 
     func isAvailable() async -> Bool { TMDBClient.hasAPIKey() }
+
+    func searchCandidates(query: String) async -> [LookupCandidate] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        guard let search: TMDBTVSearch = await TMDBClient.get(
+            "search/tv",
+            queryItems: [URLQueryItem(name: "query", value: trimmed)]
+        ) else { return [] }
+        return search.results.prefix(10).map { hit in
+            let apply = Self.apply(from: hit, detail: nil)
+            let year: String? = hit.firstAirDate.flatMap { $0.isEmpty ? nil : String($0.prefix(4)) }
+            return LookupCandidate(
+                id: String(hit.id),
+                title: hit.name,
+                subtitle: year,
+                coverURL: apply.coverImageURL,
+                apply: apply
+            )
+        }
+    }
 
     func enrich(record: EnrichmentRecord) async -> EnrichmentResult {
         let title = record.title.trimmingCharacters(in: .whitespacesAndNewlines)

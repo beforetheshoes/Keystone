@@ -22,6 +22,17 @@ struct AppView: View {
                     .transition(.opacity)
                     .zIndex(2)
             }
+            if let lookup = store.lookupSheet {
+                RecordLookupSheet(
+                    store: store,
+                    databaseID: lookup.databaseID,
+                    databaseName: lookup.databaseName,
+                    existingRecordID: lookup.existingRecordID,
+                    initialQuery: lookup.initialQuery
+                )
+                .transition(.opacity)
+                .zIndex(3)
+            }
         }
         .task { await store.send(.task).finish() }
         #if os(macOS)

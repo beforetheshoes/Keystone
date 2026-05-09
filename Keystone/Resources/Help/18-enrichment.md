@@ -34,7 +34,7 @@ Some providers need an API key. You enter them under **Settings → API Keys**. 
 |----------|---------------|------------------|
 | Apple Maps (Vendors) | No | Built into the OS. |
 | Google Books | Optional | Without a key the API works at lower rate limits. With a key, get one free at [console.cloud.google.com](https://console.cloud.google.com/) → APIs & Services → Library → Books API. |
-| TMDB | Required | Free account at [themoviedb.org](https://www.themoviedb.org/) → Settings → API → request a v4 read-access token. |
+| TMDB | Required | Free account at [themoviedb.org](https://www.themoviedb.org/) → Settings → API. Either the v3 API key (32-char hex) or the v4 read-access token (a JWT) works — Keystone detects which you pasted and authenticates accordingly. |
 
 Keys live in the macOS Keychain (service `com.ryanleewilliams.keystone.api-keys`). They're never written to app preferences or backed up alongside Keystone's data folder.
 

@@ -26,7 +26,7 @@ enum APIKeyKind: String, CaseIterable, Sendable {
         case .googleBooks:
             return "Optional. Books enrichment works without a key — adding one raises the daily request limit."
         case .tmdb:
-            return "Required for Movies and TV enrichment. Create a free account at themoviedb.org and copy the v4 read-access token."
+            return "Required for Movies and TV enrichment. Create a free account at themoviedb.org → Settings → API. Either the v3 API key (a 32-char hex string) or the v4 read-access token (a JWT) works."
         }
     }
 }

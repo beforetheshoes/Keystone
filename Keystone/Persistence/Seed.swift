@@ -137,6 +137,7 @@ enum Seed {
             PropSeed(db: "activities", key: "organization", label: "Vendor", type: "relation", sort: 2),
             PropSeed(db: "activities", key: "start",        label: "Start",  type: "date_tz",  sort: 3),
             PropSeed(db: "activities", key: "end",          label: "End",    type: "date_tz",  sort: 4),
+            PropSeed(db: "activities", key: "address",      label: "Address",type: "address",  sort: 4.5),
             PropSeed(db: "activities", key: "cost",         label: "Cost",   type: "currency", sort: 5),
             PropSeed(db: "activities", key: "notes",        label: "Notes",  type: "text",     sort: 6),
             // lodging
@@ -145,6 +146,7 @@ enum Seed {
             PropSeed(db: "lodging", key: "organization",        label: "Vendor",       type: "relation", sort: 2),
             PropSeed(db: "lodging", key: "check_in",            label: "Check-in",     type: "date_tz",  sort: 3),
             PropSeed(db: "lodging", key: "check_out",           label: "Check-out",    type: "date_tz",  sort: 4),
+            PropSeed(db: "lodging", key: "address",             label: "Address",      type: "address",  sort: 4.5),
             PropSeed(db: "lodging", key: "confirmation_number", label: "Confirmation", type: "text",     sort: 5),
             PropSeed(db: "lodging", key: "cost",                label: "Cost",         type: "currency", sort: 6),
             PropSeed(db: "lodging", key: "notes",               label: "Notes",        type: "text",     sort: 7),

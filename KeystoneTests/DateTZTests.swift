@@ -100,6 +100,26 @@ final class DateTZTests: XCTestCase {
         }
     }
 
+    func testV26SeedsTravelAddressProperties() throws {
+        try withDB {
+            @Dependency(\.defaultDatabase) var database
+            try database.read { db in
+                let activitiesAddress: String? = try String.fetchOne(
+                    db,
+                    sql: "SELECT type FROM properties WHERE id = 'activities.address'"
+                )
+                XCTAssertEqual(activitiesAddress, "address",
+                               "v26 (or fresh-install seed) should add activities.address typed as address")
+
+                let lodgingAddress: String? = try String.fetchOne(
+                    db,
+                    sql: "SELECT type FROM properties WHERE id = 'lodging.address'"
+                )
+                XCTAssertEqual(lodgingAddress, "address")
+            }
+        }
+    }
+
     // MARK: - Storage round-trip
 
     func testWriteSplitsCompoundIntoColumns() throws {

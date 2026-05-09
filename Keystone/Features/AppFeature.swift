@@ -66,6 +66,29 @@ struct AppFeature {
         var captureOpen: Bool = false
         var captureKind: CaptureKind = .person
         var captureName: String = ""
+
+        /// Lookup-first creation state. Non-nil when the sheet is open;
+        /// carries the database id + display name for the picker. Reset
+        /// to nil on close, on candidate pick, or on database/nav change.
+        var lookupSheet: LookupSheetState?
+    }
+
+    struct LookupSheetState: Equatable {
+        var databaseID: String
+        var databaseName: String
+        /// When non-nil, picks apply to this existing record (the
+        /// "re-enrich" flow) instead of creating a new one.
+        var existingRecordID: String?
+        /// Pre-filled query — the existing record's title for re-enrich,
+        /// empty for fresh creation.
+        var initialQuery: String
+
+        init(databaseID: String, databaseName: String, existingRecordID: String? = nil, initialQuery: String = "") {
+            self.databaseID = databaseID
+            self.databaseName = databaseName
+            self.existingRecordID = existingRecordID
+            self.initialQuery = initialQuery
+        }
     }
 
     enum Nav: Equatable {
@@ -158,6 +181,21 @@ struct AppFeature {
         case captureKindChanged(CaptureKind)
         case captureSubmit
         case createBlankRecord(databaseID: String)
+        /// Open the lookup-first creation sheet for a database with a
+        /// registered `LookupProvider`. Falls through to
+        /// `createBlankRecord` if no provider is available right now.
+        case openLookup(databaseID: String, databaseName: String)
+        /// Re-enrich an existing record via the lookup sheet, with the
+        /// record's current title pre-filled as the search query.
+        case openReenrichLookup(databaseID: String, databaseName: String, recordID: String, currentTitle: String)
+        /// Internal — fired by `openLookup` / `openReenrichLookup` after
+        /// it resolves provider availability. State mutation is split
+        /// out from the async availability check so the reducer stays
+        /// straightforward.
+        case presentLookupSheet(state: LookupSheetState)
+        case closeLookup
+        case lookupCandidatePicked(databaseID: String, candidate: LookupCandidate)
+        case lookupCandidatePickedForExisting(databaseID: String, recordID: String, candidate: LookupCandidate)
         case recordCreated(record: RecordRow, openDetail: Bool)
         case updateRecordTitle(recordID: String, title: String)
         case updatePropertyValue(recordID: String, key: String, value: String)
@@ -533,6 +571,107 @@ struct AppFeature {
                 return .run { send in
                     guard let rec = try? dbClient.createRecord(databaseID, title) else { return }
                     await send(.recordCreated(record: rec, openDetail: true))
+                }
+
+            case let .openLookup(databaseID, databaseName):
+                // Fall through to blank-create if there's no provider
+                // registered, or the provider isn't available right now
+                // (e.g. TMDB key not set). The button is the same shape
+                // either way, so the user doesn't need to learn two paths.
+                return .run { send in
+                    let available = await LookupRegistry.hasAvailableProvider(for: databaseID)
+                    if available {
+                        await send(.presentLookupSheet(state: LookupSheetState(databaseID: databaseID, databaseName: databaseName)))
+                    } else {
+                        await send(.createBlankRecord(databaseID: databaseID))
+                    }
+                }
+
+            case let .openReenrichLookup(databaseID, databaseName, recordID, currentTitle):
+                // Right-click "Re-enrich…" path. Open the same sheet
+                // pre-populated with the record's current title; on pick,
+                // the existing record is updated instead of a new one
+                // being created. Silently no-ops if no provider is wired
+                // up for this database.
+                return .run { send in
+                    let available = await LookupRegistry.hasAvailableProvider(for: databaseID)
+                    guard available else { return }
+                    await send(.presentLookupSheet(state: LookupSheetState(
+                        databaseID: databaseID,
+                        databaseName: databaseName,
+                        existingRecordID: recordID,
+                        initialQuery: currentTitle
+                    )))
+                }
+
+            case let .presentLookupSheet(sheetState):
+                state.lookupSheet = sheetState
+                return .none
+
+            case .closeLookup:
+                state.lookupSheet = nil
+                return .none
+
+            case let .lookupCandidatePicked(databaseID, candidate):
+                state.lookupSheet = nil
+                let openDetail = KeystoneSettings.openInDetailAfterAdd
+                return .run { send in
+                    guard let blank = try? dbClient.createRecord(databaseID, candidate.title) else { return }
+                    // Apply the payload (property writes + cover download)
+                    // BEFORE moving on so the freshly-written record is
+                    // visible to whichever view loads next.
+                    await EnrichmentService.shared.applyForLookup(
+                        candidate.apply,
+                        databaseID: databaseID,
+                        recordID: blank.id,
+                        title: candidate.title
+                    )
+                    await send(.refreshSidebar)
+                    if openDetail {
+                        // Going through `setNav(.record(...))` (rather
+                        // than `recordCreated`, which stores the pre-
+                        // apply RecordRow snapshot) is what guarantees
+                        // the detail view loads the populated row.
+                        await send(.setNav(.record(databaseID: databaseID, recordID: blank.id)))
+                    } else {
+                        // Default: stay on the gallery / list so the
+                        // user can add another record without a back
+                        // trip. Refresh the records grid so the new
+                        // card appears with its cover + populated meta.
+                        await send(.refreshCurrentRecords)
+                    }
+                }
+
+            case let .lookupCandidatePickedForExisting(databaseID, recordID, candidate):
+                state.lookupSheet = nil
+                let onRecordDetail = state.nav == .record(databaseID: databaseID, recordID: recordID)
+                return .run { send in
+                    // Update the record's title to match the picked
+                    // candidate so e.g. a wrong-edition match becomes
+                    // the user's stored title, not the bad guess.
+                    try? dbClient.updateRecordTitle(recordID, candidate.title)
+                    // Overwrite mode: the user is explicitly asking for
+                    // fresh data; provider-owned columns get rewritten,
+                    // but keys the provider doesn't return (notes,
+                    // status, rating, started_date, …) are untouched.
+                    await EnrichmentService.shared.applyForLookup(
+                        candidate.apply,
+                        databaseID: databaseID,
+                        recordID: recordID,
+                        title: candidate.title,
+                        overwrite: true
+                    )
+                    await send(.refreshSidebar)
+                    // Stay where the user already is. If they triggered
+                    // re-enrich from the detail view's ⋯ menu, reload
+                    // that record so the freshly-written values land.
+                    // Otherwise (gallery/list/table right-click), refresh
+                    // the records grid in place — no nav jump.
+                    if onRecordDetail {
+                        await send(.setNav(.record(databaseID: databaseID, recordID: recordID)))
+                    } else {
+                        await send(.refreshCurrentRecords)
+                    }
                 }
 
             case let .recordCreated(record, openDetail):

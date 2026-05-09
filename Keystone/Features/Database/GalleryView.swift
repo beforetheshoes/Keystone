@@ -1,10 +1,14 @@
 import SwiftUI
+import ComposableArchitecture
 
 struct GalleryView: View {
     var db: DBRow
     var properties: [PropertyRow]
     var records: [RecordRow]
     var onOpen: (RecordRow) -> Void
+    /// Optional store handle so the right-click context menu can
+    /// dispatch actions ("Re-enrich…"). When nil, the menu is hidden.
+    var store: StoreOf<AppFeature>? = nil
 
     private let columns = [GridItem(.adaptive(minimum: 220), spacing: 14)]
 
@@ -13,6 +17,18 @@ struct GalleryView: View {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(records) { r in
                     GalleryCard(db: db, properties: properties, record: r) { onOpen(r) }
+                        .contextMenu {
+                            if let store, LookupRegistry.provider(for: db.id) != nil {
+                                Button("Re-enrich…") {
+                                    store.send(.openReenrichLookup(
+                                        databaseID: db.id,
+                                        databaseName: db.name,
+                                        recordID: r.id,
+                                        currentTitle: r.title
+                                    ))
+                                }
+                            }
+                        }
                 }
             }
             .padding(20)
@@ -32,35 +48,57 @@ private struct GalleryCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
-                // Striped tinted hero
-                ZStack(alignment: .bottomLeading) {
-                    if let url = record.coverImageURL {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            default:
+                // Cover hero. Book/movie/TV covers are typically 2:3
+                // (taller than wide); we honor that with a 2:3 aspect
+                // ratio so the entire cover is visible (no clipping at
+                // the bottom). The `Color.clear` is the layout anchor —
+                // it claims the full cell width at 2:3 regardless of
+                // what's overlayed, which keeps every card the exact
+                // same hero size whether the record has a cover, a
+                // square cover, a letterboxed cover, or no cover at
+                // all. Without the anchor, ZStack's intrinsic size
+                // depends on its children and cards drift heights.
+                Color.clear
+                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .overlay {
+                        if let url = record.coverImageURL {
+                            ZStack {
+                                KstColor.paper2
+                                AsyncImage(url: url) { phase in
+                                    switch phase {
+                                    case .success(let image):
+                                        image.resizable().aspectRatio(contentMode: .fit)
+                                    default:
+                                        Color.clear
+                                    }
+                                }
+                            }
+                        } else {
+                            ZStack(alignment: .bottomLeading) {
                                 StripedHero(tone: record.tone)
+                                Glyph(tone: record.tone, text: record.glyph, size: 28, radius: 7)
+                                    .padding(10)
                             }
                         }
-                        .frame(height: 110)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
-                    } else {
-                        StripedHero(tone: record.tone)
-                            .frame(height: 110)
-                        Glyph(tone: record.tone, text: record.glyph, size: 28, radius: 7)
-                            .padding(10)
                     }
-                }
+                    .clipped()
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Reserve 2 lines of title height + 1 line of meta
+                    // height on every card, regardless of content
+                    // length, so the cards line up bottom-to-bottom in
+                    // the grid. SwiftUI's `reservesSpace` flag is what
+                    // pins the line count without truncating shorter
+                    // titles.
                     Text(record.title)
                         .font(.kstDisplay(size: 15, weight: .semibold))
                         .foregroundStyle(KstColor.ink0)
-                    PropertyMetaRow(properties: properties.dropFirst().prefix(3).map { $0 }, record: record)
+                        .lineLimit(2, reservesSpace: true)
+                    PropertyMetaRow(properties: properties, record: record)
                 }
                 .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(KstColor.paper0)
@@ -112,27 +150,50 @@ private struct StripedHero: View {
     }
 }
 
+/// Compact metadata strip rendered under the title in a gallery card.
+/// Keeps the cell scannable: at most two non-empty values, no labels,
+/// single line with truncation. Skips property kinds that don't read
+/// well in a chip-sized space (long opaque ids like ISBN / TMDB ID,
+/// relations, checkboxes, JSON, asset references).
 private struct PropertyMetaRow: View {
     var properties: [PropertyRow]
     var record: RecordRow
 
-    var body: some View {
-        let visible: [(PropertyRow, String)] = properties.compactMap { p in
-            let v = record.values[p.key] ?? ""
-            return (v.isEmpty || v == "—") ? nil : (p, v)
-        }
+    /// Property keys that are noise in a gallery cell — they're either
+    /// long opaque numbers (ISBN, TMDB ID, Apple Place ID) or already
+    /// implied by the cover image and title.
+    private static let suppressedKeys: Set<String> = [
+        "isbn", "tmdb_id", "place_id", "imdb_id", "asin",
+    ]
 
-        HStack(spacing: 5) {
-            ForEach(Array(visible.enumerated()), id: \.element.0.id) { idx, pair in
-                if idx > 0 {
-                    Text("·").foregroundStyle(KstColor.ink4)
-                }
-                HStack(spacing: 0) {
-                    Text("\(pair.0.name): ").foregroundStyle(KstColor.ink3)
-                    Text(pair.1).foregroundStyle(KstColor.ink2)
-                }
-            }
+    private static func isRenderable(_ p: PropertyRow) -> Bool {
+        switch p.type {
+        case .title, .relation, .checkbox, .json, .file, .multiSelect, .rollup, .computed:
+            return false
+        default:
+            return !suppressedKeys.contains(p.key)
         }
-        .font(.kstText(size: 11))
+    }
+
+    var body: some View {
+        let visible: [String] = properties
+            .filter(Self.isRenderable)
+            .compactMap { p -> String? in
+                let v = (record.values[p.key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !v.isEmpty, v != "—" else { return nil }
+                return v
+            }
+            .prefix(2)
+            .map { $0 }
+
+        // Always render exactly one line — even when there's nothing
+        // to show — so the meta row contributes consistent height to
+        // every card. A non-breaking space keeps the text view from
+        // collapsing to zero height when `visible` is empty.
+        Text(visible.isEmpty ? "\u{00A0}" : visible.joined(separator: " · "))
+            .font(.kstText(size: 11))
+            .foregroundStyle(KstColor.ink2)
+            .lineLimit(1, reservesSpace: true)
+            .truncationMode(.tail)
     }
 }

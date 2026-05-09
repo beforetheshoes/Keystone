@@ -123,6 +123,134 @@ private struct DateField: View {
     }
 }
 
+// MARK: - Date range
+
+/// Combined editor for two paired plain-`date` properties (e.g. trip
+/// `start_date` + `end_date`). Inlines two macOS-native `.compact`
+/// `DatePicker`s side by side — same chrome Calendar.app / Reminders.app
+/// use for date-range fields. Each picker opens the system calendar
+/// popover on click; we don't wrap them in a custom popover of our own.
+///
+/// Empty state: the row collapses to a single "Add dates" trigger so
+/// unset trips don't display today/today as if pre-populated. Picking
+/// a date materializes both pickers and persists them; the small ✕
+/// button reverts to empty.
+struct DateRangeField: View {
+    @Binding var startValue: String
+    @Binding var endValue: String
+    var onCommitStart: () -> Void
+    var onCommitEnd: () -> Void
+
+    @State private var startDate: Date = Date()
+    @State private var endDate: Date = Date()
+
+    private var hasAnyValue: Bool { !startValue.isEmpty || !endValue.isEmpty }
+
+    var body: some View {
+        Group {
+            if hasAnyValue {
+                editor
+            } else {
+                addTrigger
+            }
+        }
+        .onAppear { syncDates() }
+        .onChange(of: startValue) { _, _ in syncDates() }
+        .onChange(of: endValue) { _, _ in syncDates() }
+    }
+
+    private var addTrigger: some View {
+        Button {
+            // Materialize both ends with today as the default. The user
+            // immediately adjusts via the inline pickers that replace
+            // this trigger.
+            let today = Date()
+            startDate = today
+            endDate = today
+            startValue = DateValueCodec.iso(today)
+            endValue = DateValueCodec.iso(today)
+            onCommitStart()
+            onCommitEnd()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "calendar")
+                    .font(.system(size: 11))
+                    .foregroundStyle(KstColor.ink3)
+                Text("Add dates")
+                    .font(.kstText(size: 13))
+                    .foregroundStyle(KstColor.ink3)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var editor: some View {
+        HStack(spacing: 8) {
+            DatePicker(
+                "Start",
+                selection: $startDate,
+                displayedComponents: [.date]
+            )
+            .datePickerStyle(.compact)
+            .labelsHidden()
+            .onChange(of: startDate) { _, newDate in
+                let iso = DateValueCodec.iso(newDate)
+                guard iso != startValue else { return }
+                startValue = iso
+                onCommitStart()
+                // Keep end ≥ start: if the user moved start past the
+                // existing end, snap end forward.
+                if let parsedEnd = DateValueCodec.parse(endValue), parsedEnd < newDate {
+                    endDate = newDate
+                    endValue = iso
+                    onCommitEnd()
+                }
+            }
+
+            Text("–")
+                .font(.kstText(size: 13))
+                .foregroundStyle(KstColor.ink3)
+
+            DatePicker(
+                "End",
+                selection: $endDate,
+                in: startDate...,
+                displayedComponents: [.date]
+            )
+            .datePickerStyle(.compact)
+            .labelsHidden()
+            .onChange(of: endDate) { _, newDate in
+                let iso = DateValueCodec.iso(newDate)
+                guard iso != endValue else { return }
+                endValue = iso
+                onCommitEnd()
+            }
+
+            Button {
+                startValue = ""
+                endValue = ""
+                onCommitStart()
+                onCommitEnd()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(KstColor.ink3)
+            }
+            .buttonStyle(.plain)
+            .help("Clear dates")
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func syncDates() {
+        if let parsed = DateValueCodec.parse(startValue) { startDate = parsed }
+        if let parsed = DateValueCodec.parse(endValue) { endDate = parsed }
+    }
+}
+
 // MARK: - Phone
 
 private struct PhoneField: View {

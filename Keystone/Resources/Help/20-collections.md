@@ -2,17 +2,22 @@
 
 Keystone seeds a **Collections** area with four databases for tracking media you've consumed (or want to): **Books**, **Movies**, **TV Shows**, and **Restaurants**. Books / Movies / TV open in gallery view by default — cover-art-forward — while Restaurants opens in table view since the per-record cover is less useful than the comparison table.
 
-## What auto-fills
+## Adding a record — search-first
 
-If you've added an API key under **Settings → API Keys** (see [Enrichment & API keys](18-enrichment.md)), three of the four databases auto-enrich newly added records:
+Click **+ New** on Books, Movies, or TV Shows and a search sheet opens. Type the title; results stream in as you type, with cover thumbnails. Pick the right one and Keystone creates the record with every field already filled in.
 
 | Database | Provider | What you type | What gets filled in |
 |----------|----------|---------------|---------------------|
-| Books | Google Books (free, optional key) | Title + Author | ISBN, publisher, published date, page count, cover image |
-| Movies | TMDB (key required) | Title + Year | TMDB ID, release date, runtime, overview, poster |
-| TV Shows | TMDB (key required) | Title + Year | TMDB ID, first-air date, season count, episode count, overview, poster |
+| Books | Google Books (free, optional key) | Title (or "title author") | ISBN, publisher, published date, page count, cover image |
+| Movies | TMDB (key required) | Title | TMDB ID, release date, runtime, overview, poster |
+| TV Shows | TMDB (key required) | Title | TMDB ID, first-air date, season count, episode count, overview, poster |
+| Vendors | Apple Maps | Business name (or "name city") | Phone, address, locality, place ID, website |
 
-The trigger property is the one that's blank after you create the record — `isbn` for Books, `tmdb_id` for Movies and TV. Once that field has a value, Keystone considers the record "enriched" and skips it on future passes.
+If a record genuinely isn't in the provider's database (a self-published book, a private vendor), use the **Create blank** button at the bottom of the sheet — that drops you into a fresh record the same way the old + New did.
+
+## Background enrichment (still there)
+
+The launch-time enrichment pass still runs as a fallback. If you typed a title manually (e.g. via the Inbox import) and it has the right name, Keystone will fill in the rest within a few seconds of the next launch. The trigger property is the one that's blank — `isbn` for Books, `tmdb_id` for Movies and TV, `place_id` for Vendors. Once it's set, the record is considered enriched and skipped on future passes.
 
 ## Status as a cycle pill
 
@@ -35,7 +40,7 @@ The advantage of the relation indirection: vendors you also visit for non-dining
 
 ## What's not here yet
 
-- **Per-record "Enrich now" button** — the launch and post-Inbox passes catch most records. If you need to retry a single record, edit a property to clear its trigger field and the next launch picks it up.
-- **Ambiguous-match picker UI** — when a provider sees multiple plausible candidates without a clear winner, it currently skips the record and logs the count. Vendors have an interactive picker; media records will get one in a follow-up.
+- **Per-record "Re-enrich" button** — once a record is enriched, the only way to re-run lookup is to delete the trigger property and wait for the next launch pass. A toolbar action that re-opens the search sheet pre-populated with the current title is on the list.
+- **Restaurant search** — Restaurants delegate enrichment to their linked Vendor, so they currently use the plain blank-create flow. A combined "create restaurant + linked vendor" sheet is a follow-up.
 - **Multi-select tags** for genres / favorites — `options` adds single-select cycling. The `multiSelect` PropertyType isn't wired to a real editor yet.
 - **Humanized status labels** — values display as `to_read` rather than "To read". Localization is umbrella-out-of-scope for now.

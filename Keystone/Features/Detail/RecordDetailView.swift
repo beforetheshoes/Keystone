@@ -29,6 +29,17 @@ struct RecordDetailView: View {
                         }
                         Divider()
                     }
+                    if LookupRegistry.provider(for: db.id) != nil {
+                        Button("Re-enrich…") {
+                            store.send(.openReenrichLookup(
+                                databaseID: db.id,
+                                databaseName: db.name,
+                                recordID: record.id,
+                                currentTitle: record.title
+                            ))
+                        }
+                        Divider()
+                    }
                     Button("Delete record", role: .destructive) {
                         store.send(.deleteCurrentRecord)
                     }
@@ -68,6 +79,10 @@ struct RecordDetailView: View {
                     // Tags
                     TagChipRow(store: store)
                         .padding(.bottom, 24)
+
+                    if db.id == "trips" {
+                        TripDetailAugmentation(store: store, db: db, record: record)
+                    }
 
                     #if canImport(MapKit)
                     if #available(iOS 26.0, macOS 26.0, *),
@@ -368,52 +383,56 @@ private struct PropertiesGrid: View {
     var onChange: (String) -> Void
     var onSubmit: (String) -> Void
 
+    /// Render plan: each entry is either a single property row or a
+    /// fused date-range row (start + end pair). Built once per body so
+    /// the iteration logic doesn't have to track skip state inline.
+    private enum RowItem: Identifiable {
+        case single(PropertyRow)
+        case dateRange(start: PropertyRow, end: PropertyRow)
+        var id: String {
+            switch self {
+            case .single(let p): return p.id
+            case .dateRange(let s, _): return "range:\(s.id)"
+            }
+        }
+    }
+
+    private var rowPlan: [RowItem] {
+        let visible = properties.filter { $0.type != .title }
+        var plan: [RowItem] = []
+        var consumed: Set<String> = []
+        for p in visible {
+            guard !consumed.contains(p.key) else { continue }
+            // Fuse plain `.date` pairs (e.g. trips.start_date +
+            // trips.end_date) into a single range row. `date_tz` pairs
+            // are intentionally NOT fused yet — those carry per-side
+            // time-zone state and need a richer editor.
+            if p.type == .date,
+               let endKey = CalendarEventBuilder.pairedEndKey(for: p, in: visible),
+               let endProp = visible.first(where: { $0.key == endKey }) {
+                plan.append(.dateRange(start: p, end: endProp))
+                consumed.insert(endProp.key)
+            } else {
+                plan.append(.single(p))
+            }
+        }
+        return plan
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            let visible = properties.filter { $0.type != .title }
-            ForEach(Array(visible.enumerated()), id: \.element.id) { idx, p in
+            let plan = rowPlan
+            ForEach(Array(plan.enumerated()), id: \.element.id) { idx, item in
                 VStack(spacing: 0) {
-                    HStack(alignment: .center, spacing: 0) {
-                        HStack(spacing: 7) {
-                            PropTypeIcon(type: p.type)
-                            Text(p.name)
-                                .font(.kstText(size: 13))
-                                .foregroundStyle(KstColor.ink2)
-                        }
-                        .frame(width: 130, alignment: .leading)
-
-                        if p.type == .relation {
-                            RelationField(store: store, property: p)
-                        } else {
-                            PropertyValueField(
-                                property: p,
-                                value: Binding(
-                                    get: { drafts[p.key] ?? record.values[p.key] ?? "" },
-                                    set: { newValue in
-                                        drafts[p.key] = newValue
-                                    }
-                                ),
-                                onCommit: { onSubmit(p.key) },
-                                recordID: record.id
-                            )
-                        }
-
-                        Spacer(minLength: 0)
+                    switch item {
+                    case .single(let p):
+                        singleRow(p)
+                    case let .dateRange(s, e):
+                        dateRangeRow(start: s, end: e)
                     }
-                    .padding(.vertical, 9)
-
-                    #if canImport(MapKit)
-                    if p.type == .address {
-                        if #available(iOS 26.0, macOS 26.0, *) {
-                            AddressMapPreviewRow(recordID: record.id, propertyKey: p.key)
-                                .padding(.bottom, 9)
-                                .padding(.leading, 130)  // align under the value column
-                        }
-                    }
-                    #endif
                 }
                 .overlay(alignment: .bottom) {
-                    if idx < visible.count - 1 {
+                    if idx < plan.count - 1 {
                         Rectangle().fill(KstColor.paper3).frame(height: 0.5)
                     }
                 }
@@ -428,6 +447,82 @@ private struct PropertiesGrid: View {
                 .strokeBorder(KstColor.ink4, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: KstRadius.r3, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func singleRow(_ p: PropertyRow) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 0) {
+                HStack(spacing: 7) {
+                    PropTypeIcon(type: p.type)
+                    Text(p.name)
+                        .font(.kstText(size: 13))
+                        .foregroundStyle(KstColor.ink2)
+                }
+                .frame(width: 130, alignment: .leading)
+
+                if p.type == .relation {
+                    RelationField(store: store, property: p)
+                } else {
+                    PropertyValueField(
+                        property: p,
+                        value: Binding(
+                            get: { drafts[p.key] ?? record.values[p.key] ?? "" },
+                            set: { newValue in
+                                drafts[p.key] = newValue
+                            }
+                        ),
+                        onCommit: { onSubmit(p.key) },
+                        recordID: record.id
+                    )
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 9)
+
+            #if canImport(MapKit)
+            if p.type == .address {
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    AddressMapPreviewRow(recordID: record.id, propertyKey: p.key)
+                        .padding(.bottom, 9)
+                        .padding(.leading, 130)  // align under the value column
+                }
+            }
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private func dateRangeRow(start: PropertyRow, end: PropertyRow) -> some View {
+        HStack(alignment: .center, spacing: 0) {
+            HStack(spacing: 7) {
+                PropTypeIcon(type: .date)
+                // Use a combined label since the row covers both
+                // halves of the pair. "Dates" is short and accurate;
+                // the actual range is in the value cell.
+                Text("Dates")
+                    .font(.kstText(size: 13))
+                    .foregroundStyle(KstColor.ink2)
+            }
+            .frame(width: 130, alignment: .leading)
+
+            DateRangeField(
+                startValue: Binding(
+                    get: { drafts[start.key] ?? record.values[start.key] ?? "" },
+                    set: { drafts[start.key] = $0 }
+                ),
+                endValue: Binding(
+                    get: { drafts[end.key] ?? record.values[end.key] ?? "" },
+                    set: { drafts[end.key] = $0 }
+                ),
+                onCommitStart: { onSubmit(start.key) },
+                onCommitEnd: { onSubmit(end.key) }
+            )
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 9)
     }
 }
 

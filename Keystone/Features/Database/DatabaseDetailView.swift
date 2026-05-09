@@ -18,7 +18,9 @@ struct DatabaseDetailView: View {
                     selected: store.viewKind,
                     showsCalendar: hasDateProperty
                 ) { store.send(.setViewKind($0)) }
-                KstButton(style: .primary, action: { store.send(.createBlankRecord(databaseID: db.id)) }) {
+                KstButton(style: .primary, action: {
+                    store.send(.openLookup(databaseID: db.id, databaseName: db.name))
+                }) {
                     Text("+ New")
                 }
             }
@@ -76,7 +78,7 @@ struct DatabaseDetailView: View {
                     store.send(.setColumnAlignment(propertyID: propertyID, alignment: alignment))
                 }
             )
-            case .gallery:  GalleryView(db: db, properties: store.currentProperties, records: store.currentRecords) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
+            case .gallery:  GalleryView(db: db, properties: store.currentProperties, records: store.currentRecords, onOpen: { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }, store: store)
             case .list:     ListView(db: db, properties: store.currentProperties, records: store.currentRecords) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
             case .dashboard: DashboardView(db: db, properties: store.currentProperties, records: store.currentRecords)
             case .calendar: CalendarView(

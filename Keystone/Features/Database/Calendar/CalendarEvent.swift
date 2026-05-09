@@ -35,12 +35,13 @@ enum CalendarEventBuilder {
     static func pairedEndKey(for anchor: PropertyRow, in props: [PropertyRow]) -> String? {
         let candidates: [String]
         switch anchor.key.lowercased() {
-        case "start":     candidates = ["end"]
-        case "begin":     candidates = ["end"]
-        case "check_in":  candidates = ["check_out"]
-        case "from":      candidates = ["to"]
-        case "open":      candidates = ["close"]
-        default:          return nil
+        case "start":      candidates = ["end"]
+        case "start_date": candidates = ["end_date"]
+        case "begin":      candidates = ["end"]
+        case "check_in":   candidates = ["check_out"]
+        case "from":       candidates = ["to"]
+        case "open":       candidates = ["close"]
+        default:           return nil
         }
         for candidate in candidates {
             if let match = props.first(where: { $0.key.lowercased() == candidate && $0.type == anchor.type }) {

@@ -1,13 +1,39 @@
 import Foundation
 
 /// Fills in `tmdb_id`, `release_date`, `runtime_minutes`, `overview`, and
-/// the poster image for movie records. Requires a TMDB v4 read-access
-/// token (Settings → API Keys → TMDB).
-struct TMDBMovieProvider: EnrichmentProvider {
+/// the poster image for movie records. Requires a TMDB credential — either
+/// the v3 API key or the v4 read-access token works (Settings → API Keys
+/// → TMDB).
+struct TMDBMovieProvider: EnrichmentProvider, LookupProvider {
     let databaseKey = "movies"
     let triggerPropertyKey = "tmdb_id"
 
     func isAvailable() async -> Bool { TMDBClient.hasAPIKey() }
+
+    func searchCandidates(query: String) async -> [LookupCandidate] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        guard let search: TMDBMovieSearch = await TMDBClient.get(
+            "search/movie",
+            queryItems: [URLQueryItem(name: "query", value: trimmed)]
+        ) else { return [] }
+        return search.results.prefix(10).map { hit in
+            // Skip the per-id detail fetch here — search hits already
+            // carry title / year / overview / poster, which is enough
+            // for the picker. Runtime / detail-only fields won't make it
+            // into the candidate, but the picker's value is choosing the
+            // right movie, not displaying every field.
+            let apply = Self.apply(from: hit, detail: nil)
+            let year: String? = hit.releaseDate.flatMap { $0.isEmpty ? nil : String($0.prefix(4)) }
+            return LookupCandidate(
+                id: String(hit.id),
+                title: hit.title,
+                subtitle: year,
+                coverURL: apply.coverImageURL,
+                apply: apply
+            )
+        }
+    }
 
     func enrich(record: EnrichmentRecord) async -> EnrichmentResult {
         let title = record.title.trimmingCharacters(in: .whitespacesAndNewlines)

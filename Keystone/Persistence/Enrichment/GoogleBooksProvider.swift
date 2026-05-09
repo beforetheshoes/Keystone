@@ -5,13 +5,58 @@ private let log = Logger(subsystem: "Keystone", category: "Enrichment.GoogleBook
 
 /// Looks up books via the Google Books volumes endpoint. Works without an
 /// API key (lower rate limits); keys are consumed when present.
-struct GoogleBooksProvider: EnrichmentProvider {
+struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
     let databaseKey = "books"
     let triggerPropertyKey = "isbn"
 
     /// Always available — endpoint works keyless. The API key, if set,
     /// just raises the daily quota.
     func isAvailable() async -> Bool { true }
+
+    func searchCandidates(query: String) async -> [LookupCandidate] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var components = URLComponents(string: "https://www.googleapis.com/books/v1/volumes")!
+        components.queryItems = [
+            URLQueryItem(name: "q",          value: trimmed),
+            URLQueryItem(name: "maxResults", value: "10"),
+        ]
+        if let apiKey = APIKeys.get(.googleBooks), !apiKey.isEmpty {
+            components.queryItems?.append(URLQueryItem(name: "key", value: apiKey))
+        }
+        guard let url = components.url else { return [] }
+
+        let response: GBVolumesResponse
+        do {
+            let (data, urlResponse) = try await URLSession.shared.data(from: url)
+            if let http = urlResponse as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                log.error("books search status \(http.statusCode)")
+                return []
+            }
+            response = try JSONDecoder().decode(GBVolumesResponse.self, from: data)
+        } catch {
+            log.error("books search \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+
+        return (response.items ?? []).compactMap { volume in
+            guard let apply = Self.apply(from: volume) else { return nil }
+            let info = volume.volumeInfo
+            let subtitleParts: [String?] = [
+                info.authors?.joined(separator: ", "),
+                info.publishedDate.flatMap { String($0.prefix(4)) },
+            ]
+            let subtitle = subtitleParts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            return LookupCandidate(
+                id: volume.id,
+                title: info.title,
+                subtitle: subtitle.isEmpty ? nil : subtitle,
+                coverURL: apply.coverImageURL,
+                apply: apply
+            )
+        }
+    }
 
     func enrich(record: EnrichmentRecord) async -> EnrichmentResult {
         let title = record.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -91,11 +136,7 @@ struct GoogleBooksProvider: EnrichmentProvider {
         let coverURL: URL? = {
             let links = info.imageLinks
             for raw in [links?.extraLarge, links?.large, links?.medium, links?.small, links?.thumbnail] {
-                if let raw, var components = URLComponents(string: raw) {
-                    // Google serves http URLs in the API; coerce to https.
-                    if components.scheme == "http" { components.scheme = "https" }
-                    if let url = components.url { return url }
-                }
+                if let raw, let url = upgradeCoverURL(raw) { return url }
             }
             return nil
         }()
@@ -107,6 +148,34 @@ struct GoogleBooksProvider: EnrichmentProvider {
             previewLabel: preview
         )
     }
+}
+
+// MARK: - Cover URL upgrade
+
+/// Google Books normally hands the API back a tiny `thumbnail` URL even
+/// when a sharper image exists — the higher-res variants are licensed
+/// separately. Two well-known query-param tweaks return a noticeably
+/// crisper image from the same volume id:
+///
+/// - **Drop `edge=curl`**: removes the fake page-curl decoration that
+///   Google bakes into the default thumbnail.
+/// - **`zoom=0`**: Google's content endpoint treats 0 as "send the
+///   largest available", versus the default of `zoom=1` (~128px).
+///
+/// Also coerces `http` → `https` (the API still emits insecure URLs).
+/// Returns nil only when the input doesn't parse as a URL at all.
+private func upgradeCoverURL(_ raw: String) -> URL? {
+    guard var components = URLComponents(string: raw) else { return nil }
+    if components.scheme == "http" { components.scheme = "https" }
+    var items = components.queryItems ?? []
+    items.removeAll { $0.name == "edge" }
+    if let zoomIdx = items.firstIndex(where: { $0.name == "zoom" }) {
+        items[zoomIdx].value = "0"
+    } else {
+        items.append(URLQueryItem(name: "zoom", value: "0"))
+    }
+    components.queryItems = items.isEmpty ? nil : items
+    return components.url
 }
 
 // MARK: - Response shape

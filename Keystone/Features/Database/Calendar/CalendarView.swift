@@ -9,10 +9,41 @@ struct CalendarView: View {
     var properties: [PropertyRow]
     var records: [RecordRow]
     var onOpen: (RecordRow) -> Void
+    /// Initial display mode. The user can switch via the toolbar.
+    var initialMode: CalendarMode = .month
+    /// Initial anchor date. Defaults to "now" so a fresh open lands on
+    /// today; embedders that want to focus a specific window (e.g. the
+    /// Trip detail's mini-calendar landing on the trip's start date)
+    /// override here.
+    var initialAnchor: Date? = nil
+    /// When non-nil, events whose start instant falls outside this range
+    /// are filtered out before rendering. Used by the Trip detail
+    /// augmentation to scope the embedded calendar to the trip's window.
+    var dateRangeFilter: ClosedRange<Date>? = nil
 
-    @State private var mode: CalendarMode = .month
-    @State private var anchor: Date = .now
+    @State private var mode: CalendarMode
+    @State private var anchor: Date
     @State private var anchorPropKey: String?
+
+    init(
+        db: DBRow,
+        properties: [PropertyRow],
+        records: [RecordRow],
+        onOpen: @escaping (RecordRow) -> Void,
+        initialMode: CalendarMode = .month,
+        initialAnchor: Date? = nil,
+        dateRangeFilter: ClosedRange<Date>? = nil
+    ) {
+        self.db = db
+        self.properties = properties
+        self.records = records
+        self.onOpen = onOpen
+        self.initialMode = initialMode
+        self.initialAnchor = initialAnchor
+        self.dateRangeFilter = dateRangeFilter
+        _mode = State(initialValue: initialMode)
+        _anchor = State(initialValue: initialAnchor ?? .now)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,7 +69,9 @@ struct CalendarView: View {
 
     private var events: [CalendarEvent] {
         guard let prop = anchorProperty else { return [] }
-        return CalendarEventBuilder.events(from: records, anchor: prop, in: properties)
+        let all = CalendarEventBuilder.events(from: records, anchor: prop, in: properties)
+        guard let range = dateRangeFilter else { return all }
+        return all.filter { range.contains($0.start) }
     }
 
     private func openEvent(_ event: CalendarEvent) {

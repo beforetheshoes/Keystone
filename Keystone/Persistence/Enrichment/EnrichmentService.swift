@@ -55,6 +55,28 @@ actor EnrichmentService {
         }
     }
 
+    /// Apply a `LookupCandidate`-shaped payload directly to a record.
+    /// Used by the lookup-first creation flow (`overwrite: false` —
+    /// blanks-only) and the right-click "re-enrich" flow (`overwrite:
+    /// true` — overwrite provider-owned metadata, leaving keys the
+    /// provider didn't return alone, so user-edited fields like
+    /// `notes`, `status`, `rating` are preserved automatically).
+    func applyForLookup(
+        _ apply: EnrichmentApply,
+        databaseID: String,
+        recordID: String,
+        title: String,
+        overwrite: Bool = false
+    ) async {
+        let synthetic = EnrichmentRecord(
+            id: recordID,
+            databaseID: databaseID,
+            title: title,
+            propertyValues: [:]
+        )
+        await applyEnrichment(apply, to: synthetic, overwrite: overwrite)
+    }
+
     /// Run one pass across every available provider. Pass `onlyDatabase`
     /// to filter to a specific provider (CLI `--database <key>`); when
     /// nil, every registered provider runs.
@@ -193,7 +215,18 @@ actor EnrichmentService {
     /// behavior: only blank fields get the new value; existing user-set
     /// values are preserved. Cover image (when present) is downloaded
     /// and attached after the property writes complete.
-    private func applyEnrichment(_ apply: EnrichmentApply, to rec: EnrichmentRecord) async {
+    ///
+    /// `overwrite: false` (default) is the background-pass behavior —
+    /// a value is written only when the existing column is null/empty.
+    /// `overwrite: true` is what the right-click "re-enrich" flow
+    /// passes: every key in `apply.propertyUpdates` is written even if
+    /// the column already has a value. Keys the provider doesn't return
+    /// (e.g. `notes`, `status`, `rating`) are untouched in either mode.
+    private func applyEnrichment(
+        _ apply: EnrichmentApply,
+        to rec: EnrichmentRecord,
+        overwrite: Bool = false
+    ) async {
         @Dependency(\.defaultDatabase) var database
 
         let written: [String]
@@ -203,17 +236,19 @@ actor EnrichmentService {
                 for (key, value) in apply.propertyUpdates {
                     guard !value.isEmpty else { continue }
                     let propID = "\(rec.databaseID).\(key)"
-                    let existing = try String.fetchOne(
-                        db,
-                        sql: """
-                            SELECT pv.text_value FROM property_values pv
-                            WHERE pv.record_id = ? AND pv.property_id = ?
-                              AND pv.text_value IS NOT NULL AND pv.text_value != ''
-                            LIMIT 1
-                        """,
-                        arguments: [rec.id, propID]
-                    )
-                    if existing != nil { continue }
+                    if !overwrite {
+                        let existing = try String.fetchOne(
+                            db,
+                            sql: """
+                                SELECT pv.text_value FROM property_values pv
+                                WHERE pv.record_id = ? AND pv.property_id = ?
+                                  AND pv.text_value IS NOT NULL AND pv.text_value != ''
+                                LIMIT 1
+                            """,
+                            arguments: [rec.id, propID]
+                        )
+                        if existing != nil { continue }
+                    }
                     try DBWrites.updatePropertyValue(
                         db,
                         recordID: rec.id,

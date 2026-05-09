@@ -20,7 +20,8 @@ Things you do *during* a trip — a museum visit, a dinner, a tour booking. Each
 - **Title** — what it is.
 - **Trip** — links the activity back to its parent Trip. Open the Trip to see all linked Activities; open the Activity to jump back.
 - **Vendor** — links to the existing **Vendors** database. Reuses MapKit-driven vendor enrichment for phone / address / website, so an entry like "teamLab Planets" gets auto-populated once you add the vendor record.
-- **Start** / **End** — when it happens. Plain dates today; time-zone-aware variants land in a follow-up.
+- **Start** / **End** — when it happens, with the event-local IANA time zone stored alongside the instant.
+- **Address** — structured address with autocomplete + an inline map. Pinned on the trip's route map.
 - **Cost** — currency-formatted, so totals roll up cleanly later.
 - **Notes** — anything else.
 
@@ -29,7 +30,8 @@ Things you do *during* a trip — a museum visit, a dinner, a tour booking. Each
 Where you stay. Properties parallel Activities with hospitality-specific extras:
 
 - **Name**, **Trip**, **Vendor**, **Notes**, **Cost**.
-- **Check-in** / **Check-out** — the stay window.
+- **Check-in** / **Check-out** — the stay window, with the event-local IANA time zone.
+- **Address** — structured address pinned on the trip's route map.
 - **Confirmation** — the booking reference.
 
 ### Transportation
@@ -46,12 +48,20 @@ The **Trip** relation property on Activities, Lodging, and Transportation is the
 
 Vendors flow through the Travel area the same way they do in Vehicle Maintenance: pick an existing vendor by name, or type a new one and Keystone creates the vendor stub for you on the fly.
 
+## Trip detail layout
+
+Open a Trip and you get a bespoke layout below the standard property fields:
+
+- **Itinerary** — every linked Activity and Lodging stop, grouped by **event-local day**. A 9 PM dinner in Paris stays under "Paris-time Jun 3" no matter where you're sitting when you read it. Within a day, items sort by absolute instant. Tap any row to jump to the underlying record.
+- **Calendar** — an embedded week-view scoped to the trip's start/end window, drawing the same activities + lodging stops onto a time grid in their event-local time. Use the toolbar inside the calendar to switch to Day or Month if you need a different framing; navigation chevrons stay inside the trip's window.
+- **Route** — a MapKit map pinning every Activity and Lodging address. The map auto-frames so all pins fit. Stops without a structured address (no autocomplete pick) don't appear; pick a suggestion to drop a pin.
+- **Total** — sum of the **Cost** property across linked Activities, Lodging, and Transportation, plus a summary line counting activities, lodging stays, and transportation legs (drawn from each Transportation row's `legs` JSON).
+
+The augmentation only renders for Trip records — every other database (People, Vendors, Books, …) keeps the standard detail layout.
+
 ## What's not here yet
 
-- **Calendar view** of activities by day — coming with the calendar view-kind work.
-- **Bespoke Trip detail page** with itinerary timeline, mini-calendar, and route map — coming after calendar lands.
 - **Per-trip biometric lock** that honors the **Locked** checkbox — ships with the privacy-lock work.
-- **Time-zone-aware date properties** — the existing date type is used for now; a `date+tz` type lands shortly and the seed will migrate to it.
 - **Multi-leg transportation editor** — `legs` accepts raw JSON today.
 
 These are tracked as their own follow-up issues; the seeded shape here is the foundation they all build on.

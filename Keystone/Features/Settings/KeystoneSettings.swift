@@ -34,6 +34,19 @@ enum KeystoneSettings {
         return full.split(separator: " ").first.map(String.init) ?? full
     }
 
+    // MARK: - Behavior
+
+    /// Whether picking a candidate from the lookup-first creation sheet
+    /// (Books / Movies / TV / Vendors) navigates straight into the new
+    /// record's detail view. Default `false` — the rapid-add flow keeps
+    /// the user on the gallery so they can add another record without
+    /// a back-button round-trip. Toggle in Settings → Behavior.
+    static let openInDetailAfterAddKey = "openInDetailAfterAdd"
+
+    static var openInDetailAfterAdd: Bool {
+        UserDefaults.standard.bool(forKey: openInDetailAfterAddKey)
+    }
+
     // MARK: - Recent time zones
 
     static let recentTimeZonesKey = "kst.recentTimeZones"

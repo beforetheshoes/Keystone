@@ -80,3 +80,85 @@ struct EnrichmentApply: Sendable, Equatable {
         self.previewLabel = previewLabel
     }
 }
+
+// MARK: - Interactive lookup (lookup-first creation)
+
+/// A single candidate returned by `LookupProvider.searchCandidates`.
+/// Drives the candidate-picker UI shown when the user clicks **+ New**
+/// on a database that has interactive lookup wired up.
+///
+/// `apply` carries the same `EnrichmentApply` payload the post-create
+/// `EnrichmentProvider.enrich(record:)` path produces, so picking a
+/// candidate doesn't require a second round-trip — the create flow
+/// dispatches `createRecord(title:)` then writes `apply` directly.
+struct LookupCandidate: Identifiable, Equatable, Sendable {
+    /// Provider-stable id (e.g. TMDB's numeric id, Google Books' volume
+    /// id, MapKit's place id). Used as the SwiftUI list identity.
+    let id: String
+    /// Headline label for the row (e.g. movie title, book title).
+    let title: String
+    /// Optional secondary line — author, year, address.
+    let subtitle: String?
+    /// Optional thumbnail URL. The picker renders via `AsyncImage`.
+    let coverURL: URL?
+    /// Payload to write after the record is created. Includes the
+    /// trigger property so the new record won't be re-picked by the
+    /// background enrichment pass.
+    let apply: EnrichmentApply
+}
+
+/// A provider that supports interactive search. Implementing this is
+/// optional — databases without an implementation fall back to the plain
+/// "create blank" flow.
+protocol LookupProvider: Sendable {
+    /// Database key this provider serves (e.g. "books", "movies",
+    /// "tv_shows", "vendors", "restaurants").
+    var databaseKey: String { get }
+
+    /// True when the provider has what it needs (e.g. an API key) to
+    /// answer a search. The picker hides itself when no provider is
+    /// available for the current database.
+    func isAvailable() async -> Bool
+
+    /// Up to ~10 candidates for `query`. Returns an empty list rather
+    /// than throwing on transient errors so the picker just shows
+    /// "no matches" instead of an error toast.
+    func searchCandidates(query: String) async -> [LookupCandidate]
+}
+
+/// Static lookup of which provider serves a given database. Kept tiny
+/// and synchronous so view code can ask "is lookup wired up here?" in
+/// `body` without hopping actors.
+enum LookupRegistry {
+    static func provider(for databaseKey: String) -> (any LookupProvider)? {
+        switch databaseKey {
+        case "books":
+            return GoogleBooksProvider()
+        case "movies":
+            return TMDBMovieProvider()
+        case "tv_shows":
+            return TMDBTVProvider()
+        #if canImport(MapKit)
+        case "vendors":
+            if #available(iOS 26.0, macOS 26.0, *) {
+                return MapKitVendorProvider()
+            }
+            return nil
+        // Restaurants are intentionally absent here — their schema
+        // delegates address/phone/etc to a linked vendor record, so a
+        // restaurant lookup-first flow would need to create both rows
+        // and wire the relation. Out of scope for the first cut.
+        #endif
+        default:
+            return nil
+        }
+    }
+
+    /// True when `databaseKey` has a provider AND that provider is
+    /// available right now (e.g. TMDB key set). Used by the **+ New**
+    /// button to decide between lookup-first and blank-create.
+    static func hasAvailableProvider(for databaseKey: String) async -> Bool {
+        guard let provider = provider(for: databaseKey) else { return false }
+        return await provider.isAvailable()
+    }
+}

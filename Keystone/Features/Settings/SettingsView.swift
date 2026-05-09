@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @AppStorage(KeystoneSettings.displayNameKey) private var displayName: String = ""
+    @AppStorage(KeystoneSettings.openInDetailAfterAddKey) private var openInDetailAfterAdd: Bool = false
 
     @State private var currentLocation: WorkspaceLocation = .container
     @State private var alert: AlertContent?
@@ -59,6 +60,14 @@ struct SettingsView: View {
                 Text("Storage")
             } footer: {
                 Text(storageFooter)
+            }
+
+            Section {
+                Toggle("Open new records in detail view", isOn: $openInDetailAfterAdd)
+            } header: {
+                Text("Behavior")
+            } footer: {
+                Text("When you pick a Book, Movie, TV Show, or Vendor from the search sheet, Keystone normally stays on the gallery so you can add another record right away. Turn this on to jump into the new record's detail view instead.")
             }
 
             Section {
