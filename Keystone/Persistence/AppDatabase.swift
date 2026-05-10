@@ -351,6 +351,9 @@ enum AppDatabase {
         migrator.registerMigration("v38-drop-assets-workspace-fk") { db in
             try Schema.dropAssetsWorkspaceFKV38(db)
         }
+        migrator.registerMigration("v39-rename-events-database") { db in
+            try Schema.renameEventsDatabaseV39(db)
+        }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")

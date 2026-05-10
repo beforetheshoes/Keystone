@@ -2227,4 +2227,25 @@ enum Schema {
         guard !hasColumn else { return }
         try db.execute(sql: "ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
     }
+
+    /// v39 — rename the seeded `events` database from "Events & Trips"
+    /// to just "Events". The combined label dates from before #2 split
+    /// Trips into a dedicated database under the Travel area; with
+    /// that in place, "& Trips" is misleading sidebar copy that points
+    /// the user at the wrong database.
+    ///
+    /// Guarded by an exact match on the prior name + plural so a user
+    /// who already renamed the row (e.g. to "Calendar" or back to
+    /// "Events" themselves) keeps their override. Idempotent.
+    static func renameEventsDatabaseV39(_ db: Database) throws {
+        try db.execute(
+            sql: """
+                UPDATE databases
+                SET name = 'Events', plural_name = 'Events'
+                WHERE id = 'events'
+                  AND name = 'Events & Trips'
+                  AND plural_name = 'Events & Trips'
+            """
+        )
+    }
 }

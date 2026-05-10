@@ -44,7 +44,7 @@ enum Seed {
             DBSeed(key: "service_catalog", name: "Service Catalog", plural: "Service Catalog", icon: "SC", accent: "iris", area: "area-mobility", defaultView: "list", sort: 4.6),
             DBSeed(key: "vendors",     name: "Vendors",        plural: "Vendors",       icon: "Vn", accent: "graphite", area: "area-records",  defaultView: "table",     sort: 4.7),
             DBSeed(key: "documents",   name: "Documents",      plural: "Documents",     icon: "D",  accent: "cerulean", area: "area-records",  defaultView: "table",     sort: 5),
-            DBSeed(key: "events",      name: "Events & Trips", plural: "Events & Trips",icon: "E",  accent: "amber",    area: "area-plans",    defaultView: "table",     sort: 6),
+            DBSeed(key: "events",      name: "Events",         plural: "Events",        icon: "E",  accent: "amber",    area: "area-plans",    defaultView: "table",     sort: 6),
             DBSeed(key: "trips",          name: "Trips",          plural: "Trips",          icon: "T",  accent: "cerulean", area: "area-travel", defaultView: "list",  sort: 7.0),
             DBSeed(key: "activities",     name: "Activities",     plural: "Activities",     icon: "Ac", accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.1),
             DBSeed(key: "lodging",        name: "Lodging",        plural: "Lodging",        icon: "L",  accent: "cerulean", area: "area-travel", defaultView: "table", sort: 7.2),
