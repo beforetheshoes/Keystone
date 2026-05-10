@@ -232,10 +232,16 @@ enum DBReads {
     /// `AppFeature.State.hiddenRecordIDs` — protected records (and any
     /// dependents in the cascade) are filtered out at the SQL level so
     /// downstream UI surfaces never see them.
+    ///
+    /// `encryptor` is optional: when present (live env via DatabaseClient),
+    /// `enc_value` blobs are decrypted into the values dict; when nil
+    /// (CLI / tests), encrypted rows surface as the literal `[encrypted]`
+    /// placeholder so callers can tell at a glance.
     static func records(
         _ db: Database,
         databaseID: String,
-        excluding: Set<String> = []
+        excluding: Set<String> = [],
+        encryptor: ValueEncryptor? = nil
     ) throws -> [RecordRow] {
         let recRowsRaw = try Row.fetchAll(db, sql: """
             SELECT r.id, r.database_id, r.title, r.glyph, r.tone, r.sort_index,
@@ -258,7 +264,7 @@ enum DBReads {
 
         let placeholders = Array(repeating: "?", count: recIDs.count).joined(separator: ",")
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT pv.record_id, p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value
+            SELECT pv.record_id, p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value, pv.enc_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id IN (\(placeholders))
@@ -269,6 +275,18 @@ enum DBReads {
             let rid: String = row["record_id"]
             let key: String = row["key"]
             let propType: String = row["type"] ?? ""
+            // Encrypted column wins — when populated, plaintext columns
+            // were nulled by the encryption pass. Decrypt if a key is
+            // available; otherwise surface a placeholder so the caller
+            // (CLI, tests) can tell the value is intentionally opaque.
+            if let enc: Data = row["enc_value"], !enc.isEmpty {
+                if let encryptor, let plain = try? encryptor.decrypt(enc) {
+                    byRecord[rid, default: [:]][key] = plain
+                } else {
+                    byRecord[rid, default: [:]][key] = "[encrypted]"
+                }
+                continue
+            }
             if propType == "date_tz" {
                 let date = row["date_value"] as String? ?? ""
                 let tz = row["text_value"] as String? ?? ""
@@ -396,7 +414,11 @@ enum DBReads {
         return raw
     }
 
-    static func record(_ db: Database, id: String) throws -> RecordRow? {
+    static func record(
+        _ db: Database,
+        id: String,
+        encryptor: ValueEncryptor? = nil
+    ) throws -> RecordRow? {
         guard let row = try Row.fetchOne(db, sql: """
             SELECT r.id, r.database_id, r.title, r.glyph, r.tone, r.sort_index,
                    r.cover_asset_id, a.relative_path AS cover_relative_path
@@ -406,7 +428,7 @@ enum DBReads {
         """, arguments: [id]) else { return nil }
 
         let valueRows = try Row.fetchAll(db, sql: """
-            SELECT p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value
+            SELECT p.key, p.type, pv.text_value, pv.number_value, pv.date_value, pv.json_value, pv.enc_value
             FROM property_values pv
             JOIN properties p ON p.id = pv.property_id
             WHERE pv.record_id = ?
@@ -416,6 +438,14 @@ enum DBReads {
         for vrow in valueRows {
             let key: String = vrow["key"]
             let propType: String = vrow["type"] ?? ""
+            if let enc: Data = vrow["enc_value"], !enc.isEmpty {
+                if let encryptor, let plain = try? encryptor.decrypt(enc) {
+                    values[key] = plain
+                } else {
+                    values[key] = "[encrypted]"
+                }
+                continue
+            }
             if propType == "date_tz" {
                 let date = vrow["date_value"] as String? ?? ""
                 let tz = vrow["text_value"] as String? ?? ""
@@ -503,14 +533,15 @@ enum DBReads {
     static func relatedRecords(
         _ db: Database,
         sourceID: String,
-        excluding: Set<String> = []
+        excluding: Set<String> = [],
+        encryptor: ValueEncryptor? = nil
     ) throws -> [RecordRow] {
         let targetIDs = try String.fetchAll(db, sql: """
             SELECT target_record_id FROM relations WHERE source_record_id = ?
         """, arguments: [sourceID])
         return try targetIDs
             .filter { !excluding.contains($0) }
-            .compactMap { try record(db, id: $0) }
+            .compactMap { try record(db, id: $0, encryptor: encryptor) }
     }
 
     static func paletteItems(

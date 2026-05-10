@@ -68,6 +68,23 @@ enum SidecarWriter {
         }
     }
 
+    /// Drop the sidecar file for `recordID` if it exists. Used by
+    /// `writeIfPresent` when the record is encrypted so the
+    /// Finder-visible markdown doesn't lag the privacy state. Errors
+    /// are swallowed — the worst case is leaving a stale sidecar on
+    /// disk, which the user can delete manually.
+    private static func removeExistingSidecarFile(_ db: Database, recordID: String) throws {
+        guard let relPath = try String.fetchOne(
+            db,
+            sql: "SELECT sidecar_path FROM records WHERE id = ?",
+            arguments: [recordID]
+        ), !relPath.isEmpty else { return }
+        let url = AppDatabase.workspaceFolder.appendingPathComponent(relPath)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     /// Like `writeIfNeeded` but ignores the suppression flag. Used by
     /// the bulk importer to fire ONE definitive sidecar write per
     /// record after all the per-write regenerates have been
@@ -81,6 +98,18 @@ enum SidecarWriter {
     }
 
     private static func writeIfPresent(_ db: Database, recordID: String) throws {
+        // Privacy check — when a record is currently encrypted (the
+        // user toggled it protected and the encryption pass ran), the
+        // sidecar would publish plaintext property values + body to a
+        // Finder-visible markdown file, defeating the at-rest
+        // encryption. Delete any existing sidecar and bail. The
+        // user's choice to protect implicitly accepts losing the
+        // sidecar's role as a portable copy; a regenerate on
+        // un-protect rebuilds it.
+        if (try? DBWrites.recordIsEncrypted(db, recordID: recordID)) == true {
+            try removeExistingSidecarFile(db, recordID: recordID)
+            return
+        }
         guard let row = try Row.fetchOne(
             db,
             sql: """

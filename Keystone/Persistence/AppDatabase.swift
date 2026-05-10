@@ -339,6 +339,9 @@ enum AppDatabase {
         migrator.registerMigration("v34-relocate-vm-assets-in-place") { db in
             try Schema.relocateVehicleMaintenanceAssetsInPlaceV34(db)
         }
+        migrator.registerMigration("v35-add-encrypted-columns") { db in
+            try Schema.addEncryptedColumnsV35(db)
+        }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")

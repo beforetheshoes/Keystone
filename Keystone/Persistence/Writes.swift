@@ -135,6 +135,349 @@ enum DBWrites {
         SidecarWriter.writeIfNeeded(db, recordID: recordID)
     }
 
+    /// Returns true if any property_values row for this record is in
+    /// the encrypted state (`enc_value` populated). Used by the write
+    /// path to decide whether incoming values need to be encrypted to
+    /// match the rest of the record's storage shape — once a record
+    /// goes through the encryption pass, all of its values track
+    /// together so a single read either sees plaintext OR encrypted,
+    /// never a mix.
+    static func recordIsEncrypted(_ db: Database, recordID: String) throws -> Bool {
+        let pvRow = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT 1 FROM property_values
+                WHERE record_id = ? AND enc_value IS NOT NULL
+                LIMIT 1
+            """,
+            arguments: [recordID]
+        )
+        if pvRow != nil { return true }
+        // A record with NO property values would never trip the pv
+        // check — fall back to checking blocks so brand-new protected
+        // records (only blocks, no values) still report correctly.
+        let blockRow = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT 1 FROM blocks
+                WHERE record_id = ? AND enc_content IS NOT NULL
+                LIMIT 1
+            """,
+            arguments: [recordID]
+        )
+        return blockRow != nil
+    }
+
+    /// Encrypt every block body for a record. Stores the original
+    /// `content_json` bytes in `enc_content` and resets `content_json`
+    /// to '{}' (the schema default — column is NOT NULL so we can't
+    /// erase it entirely; an empty JSON object is the canonical
+    /// "no plaintext" sentinel). Idempotent.
+    static func encryptRecordBlocks(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, content_json, enc_content
+            FROM blocks
+            WHERE record_id = ? AND deleted_at IS NULL
+        """, arguments: [recordID])
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        for row in rows {
+            if let existing: Data = row["enc_content"], !existing.isEmpty { continue }
+            let json: String = row["content_json"] ?? "{}"
+            // Skip the schema-default empty object — encrypting an
+            // empty body is wasted work and complicates round-trip
+            // tests that compare for "true emptiness".
+            guard json != "{}" else { continue }
+            let cipher = try encryptor.encrypt(json)
+            let id: String = row["id"]
+            try db.execute(
+                sql: "UPDATE blocks SET enc_content = ?, content_json = '{}', updated_at = ? WHERE id = ?",
+                arguments: [cipher, now, id]
+            )
+        }
+    }
+
+    /// Inverse of `encryptRecordBlocks`. Decrypts `enc_content` back
+    /// into `content_json` and clears the encrypted column.
+    static func decryptRecordBlocks(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, enc_content
+            FROM blocks
+            WHERE record_id = ? AND enc_content IS NOT NULL AND deleted_at IS NULL
+        """, arguments: [recordID])
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        for row in rows {
+            guard let enc: Data = row["enc_content"], !enc.isEmpty else { continue }
+            let plain = try encryptor.decrypt(enc)
+            let id: String = row["id"]
+            try db.execute(
+                sql: "UPDATE blocks SET content_json = ?, enc_content = NULL, updated_at = ? WHERE id = ?",
+                arguments: [plain, now, id]
+            )
+        }
+    }
+
+    /// Encrypt every asset file attached to a record. Reads the bytes
+    /// from disk, AES-GCM seals them, writes the ciphertext back to
+    /// the same path, and flips `assets.is_encrypted = 1`. Idempotent.
+    ///
+    /// Storage format on disk: a 7-byte magic prefix `"KSTENC1"` so
+    /// the read-back path can detect partial / interrupted encryption
+    /// (and so a non-Keystone tool that opens the file gets a clear
+    /// signal it's not the original bytes). The remainder is
+    /// AES-GCM combined output.
+    static func encryptRecordAssets(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, relative_path, is_encrypted
+            FROM assets
+            WHERE record_id = ?
+        """, arguments: [recordID])
+        for row in rows {
+            let id: String = row["id"]
+            let isEncrypted: Int = row["is_encrypted"] ?? 0
+            if isEncrypted == 1 { continue }
+            let relPath: String = row["relative_path"]
+            let url = AppDatabase.absoluteURL(forRelativePath: relPath)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                // Asset row points at a missing file (sync race / user
+                // deleted via Finder). Mark it encrypted=1 so we don't
+                // keep retrying on every encryption pass; the asset
+                // becomes effectively orphaned but consistent.
+                try db.execute(
+                    sql: "UPDATE assets SET is_encrypted = 1 WHERE id = ?",
+                    arguments: [id]
+                )
+                continue
+            }
+            let plain = try Data(contentsOf: url)
+            // Round-trip through ValueEncryptor's bytes channel —
+            // it accepts strings to keep parity with property values,
+            // so we base64 the bytes through. Slight overhead but
+            // keeps the abstraction symmetric.
+            let cipherInner = try encryptor.encrypt(plain.base64EncodedString())
+            var blob = Data("KSTENC1".utf8)
+            blob.append(cipherInner)
+            try blob.write(to: url, options: .atomic)
+            try db.execute(
+                sql: "UPDATE assets SET is_encrypted = 1, updated_at = ? WHERE id = ?",
+                arguments: [AppDatabase.isoFormatter.string(from: Date()), id]
+            )
+        }
+    }
+
+    /// Inverse: decrypt every encrypted asset file back to its
+    /// original bytes. Idempotent on already-plaintext assets.
+    static func decryptRecordAssets(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, relative_path, is_encrypted
+            FROM assets
+            WHERE record_id = ? AND is_encrypted = 1
+        """, arguments: [recordID])
+        for row in rows {
+            let id: String = row["id"]
+            let relPath: String = row["relative_path"]
+            let url = AppDatabase.absoluteURL(forRelativePath: relPath)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                try db.execute(
+                    sql: "UPDATE assets SET is_encrypted = 0 WHERE id = ?",
+                    arguments: [id]
+                )
+                continue
+            }
+            let blob = try Data(contentsOf: url)
+            let magic = Data("KSTENC1".utf8)
+            guard blob.count >= magic.count,
+                  blob.prefix(magic.count) == magic else {
+                // No magic prefix — file might already be plaintext
+                // (interrupted decrypt? hand-edited?). Trust the
+                // file, just clear the flag.
+                try db.execute(
+                    sql: "UPDATE assets SET is_encrypted = 0 WHERE id = ?",
+                    arguments: [id]
+                )
+                continue
+            }
+            let cipher = blob.suffix(from: magic.count)
+            let base64 = try encryptor.decrypt(Data(cipher))
+            guard let plain = Data(base64Encoded: base64) else {
+                // Shouldn't happen — encrypt path always base64-encodes
+                // before encrypting. If we hit this, the file is
+                // unrecoverable; leave it on disk for forensics.
+                continue
+            }
+            try plain.write(to: url, options: .atomic)
+            try db.execute(
+                sql: "UPDATE assets SET is_encrypted = 0, updated_at = ? WHERE id = ?",
+                arguments: [AppDatabase.isoFormatter.string(from: Date()), id]
+            )
+        }
+    }
+
+    /// Bulk-encrypt every plaintext property_value for a record, NULLing
+    /// the type-specific columns once the ciphertext is written. Called
+    /// by the toggle-on-protected path; idempotent — already-encrypted
+    /// rows are skipped.
+    ///
+    /// `encryptor` must be live (not `.disabled`); throws on any
+    /// encryption failure so the caller can surface the error rather
+    /// than silently leaving plaintext in the DB.
+    static func encryptRecordValues(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT pv.id, p.key, p.type,
+                   pv.text_value, pv.number_value, pv.date_value, pv.json_value, pv.enc_value
+            FROM property_values pv
+            JOIN properties p ON p.id = pv.property_id
+            WHERE pv.record_id = ?
+        """, arguments: [recordID])
+        for row in rows {
+            // Skip already-encrypted rows.
+            if let existing: Data = row["enc_value"], !existing.isEmpty { continue }
+            // Collapse the typed plaintext columns into a single string
+            // following the same precedence the read path uses, so the
+            // round-trip lands a value that DBReads will hand back
+            // unchanged after decryption.
+            let collapsed = collapsePlaintextForEncryption(row: row)
+            guard let plaintext = collapsed else {
+                // Empty row — nothing to encrypt. Leave it; the
+                // round-trip via decryptRecordValues stays clean.
+                continue
+            }
+            let cipher = try encryptor.encrypt(plaintext)
+            let pvID: String = row["id"]
+            try db.execute(
+                sql: """
+                    UPDATE property_values
+                    SET enc_value = ?,
+                        text_value = NULL,
+                        number_value = NULL,
+                        date_value = NULL,
+                        json_value = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                """,
+                arguments: [cipher, AppDatabase.isoFormatter.string(from: Date()), pvID]
+            )
+        }
+    }
+
+    /// Inverse of `encryptRecordValues` — decrypt every enc_value back
+    /// into the appropriate typed plaintext column based on the
+    /// property's declared type. Called by the toggle-off-protected
+    /// path. Idempotent — plaintext-only rows are skipped.
+    static func decryptRecordValues(
+        _ db: Database,
+        recordID: String,
+        encryptor: ValueEncryptor
+    ) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT pv.id, p.type, pv.enc_value
+            FROM property_values pv
+            JOIN properties p ON p.id = pv.property_id
+            WHERE pv.record_id = ? AND pv.enc_value IS NOT NULL
+        """, arguments: [recordID])
+        for row in rows {
+            guard let enc: Data = row["enc_value"], !enc.isEmpty else { continue }
+            let plain = try encryptor.decrypt(enc)
+            let propType: String = row["type"] ?? ""
+            let pvID: String = row["id"]
+            // Re-route the plaintext into the typed column the original
+            // write path would have used. Mirrors the dispatch in
+            // `updatePropertyValue` below — keep these two switch
+            // statements aligned when the type vocabulary grows.
+            var textValue: String? = nil
+            var numberValue: Double? = nil
+            var dateValue: String? = nil
+            var jsonValue: String? = nil
+            switch propType {
+            case "number", "currency":
+                if let n = Double(plain) { numberValue = n } else { textValue = plain }
+            case "date":
+                dateValue = plain
+                textValue = plain
+            case "date_tz":
+                if let split = DateValueCodec.parseTZRaw(plain) {
+                    textValue = split.tz
+                    dateValue = split.dateString
+                } else {
+                    textValue = plain
+                }
+            case "address":
+                if let parsed = AddressValueCodec.parse(plain) {
+                    textValue = parsed.display.isEmpty ? plain : parsed.display
+                    jsonValue = plain
+                } else {
+                    textValue = plain
+                }
+            case "json":
+                if let data = plain.data(using: .utf8),
+                   (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil {
+                    jsonValue = plain
+                } else {
+                    textValue = plain
+                }
+            default:
+                textValue = plain
+            }
+            try db.execute(
+                sql: """
+                    UPDATE property_values
+                    SET text_value = ?,
+                        number_value = ?,
+                        date_value = ?,
+                        json_value = ?,
+                        enc_value = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                """,
+                arguments: [textValue, numberValue, dateValue, jsonValue, AppDatabase.isoFormatter.string(from: Date()), pvID]
+            )
+        }
+    }
+
+    /// Collapse a property_values row's typed plaintext columns into
+    /// the single string the reader hands back. Mirrors the read-path
+    /// precedence in `DBReads.records` so encrypt → decrypt round-trips
+    /// stably even when `bool_value` carries the truthy bit (we don't
+    /// encrypt those today; the encryption migration leaves bool_value
+    /// alone).
+    private static func collapsePlaintextForEncryption(row: Row) -> String? {
+        let propType: String = row["type"] ?? ""
+        if propType == "date_tz" {
+            let date = row["date_value"] as String? ?? ""
+            let tz = row["text_value"] as String? ?? ""
+            if !date.isEmpty && !tz.isEmpty { return "\(date)|\(tz)" }
+            if !date.isEmpty { return date }
+            if !tz.isEmpty { return tz }
+            return nil
+        }
+        if let t: String = row["text_value"], !t.isEmpty { return t }
+        if let n: Double = row["number_value"] {
+            return n.rounded() == n ? String(Int(n)) : String(n)
+        }
+        if let d: String = row["date_value"], !d.isEmpty { return d }
+        if let j: String = row["json_value"], !j.isEmpty { return j }
+        return nil
+    }
+
     static func updatePropertyValue(_ db: Database, recordID: String, propertyKey: String, value: String) throws {
         guard let row = try Row.fetchOne(db, sql: """
             SELECT p.id AS prop_id, p.type AS prop_type, p.config_json AS prop_config, r.database_id AS db_id

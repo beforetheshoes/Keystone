@@ -78,6 +78,33 @@ enum ProtectedReads {
         return hidden
     }
 
+    /// Same fixed-point cascade as `hiddenRecordIDs` but seeded from
+    /// an arbitrary record id (rather than the literal set of
+    /// is_protected=true records). Used by the encrypt/decrypt-on-
+    /// toggle path: when a single record is just-now flagged, we need
+    /// to know which dependent records also need the bulk encryption
+    /// pass without re-running the seed query.
+    static func cascadeFromSeed(_ db: Database, seedID: String) throws -> Set<String> {
+        var hidden: Set<String> = [seedID]
+        let maxIterations = 8
+        for _ in 0..<maxIterations {
+            let placeholders = Array(repeating: "?", count: hidden.count).joined(separator: ",")
+            let dependents = try String.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT source_record_id
+                    FROM relations
+                    WHERE target_record_id IN (\(placeholders))
+                """,
+                arguments: StatementArguments(Array(hidden))
+            )
+            let newDependents = Set(dependents).subtracting(hidden)
+            if newDependents.isEmpty { break }
+            hidden.formUnion(newDependents)
+        }
+        return hidden
+    }
+
     /// Returns the IDs of every record currently flagged is_protected
     /// (truthy). Used by the "Show all protected" affordance to
     /// pre-fill the unlock set in one biometric prompt, and by

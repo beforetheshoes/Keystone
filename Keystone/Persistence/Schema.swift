@@ -2022,4 +2022,53 @@ enum Schema {
             WHERE property_id = 'service_catalog.schedule_severity'
         """)
     }
+
+    /// v35 — encryption-at-rest scaffolding for the privacy lock.
+    ///
+    /// Adds three new nullable columns:
+    ///   - `property_values.enc_value` (BLOB): AES-GCM ciphertext of
+    ///     the value when the owning record is protected (or
+    ///     cascade-protected). Plaintext columns (`text_value`,
+    ///     `number_value`, `date_value`, `json_value`) are nulled when
+    ///     `enc_value` is set, so the union of "what's set" tells you
+    ///     whether the row is encrypted.
+    ///   - `blocks.enc_content` (BLOB): same idea for block bodies.
+    ///     The plaintext `content_json` is nulled (or set to '{}' as a
+    ///     placeholder) when `enc_content` is populated.
+    ///   - `assets.is_encrypted` (INTEGER, default 0): flag indicating
+    ///     the on-disk file at `relative_path` is AES-GCM ciphertext
+    ///     instead of the original bytes. The asset reader checks this
+    ///     before vending data; if true, it decrypts via
+    ///     `ProtectionKeyClient` before handing back.
+    ///
+    /// All three additions are nullable (or default-zero) ALTER TABLE
+    /// ADD COLUMNs — instantaneous and crash-safe. Idempotent: each
+    /// ALTER is guarded with a PRAGMA table_info check, so re-running
+    /// against a half-applied migration succeeds.
+    ///
+    /// **No automatic encryption pass.** Existing protected records
+    /// stay in plaintext until the user opens them next while
+    /// authenticated; the encryption-on-write path catches up at that
+    /// point. This avoids needing a key during migration time
+    /// (migrations run before biometric auth).
+    static func addEncryptedColumnsV35(_ db: Database) throws {
+        try addColumnIfMissing(db, table: "property_values", column: "enc_value", definition: "BLOB")
+        try addColumnIfMissing(db, table: "blocks", column: "enc_content", definition: "BLOB")
+        try addColumnIfMissing(db, table: "assets", column: "is_encrypted", definition: "INTEGER NOT NULL DEFAULT 0")
+    }
+
+    /// Helper: add a column if it doesn't exist, no-op otherwise.
+    /// Wraps the PRAGMA + ALTER pattern used by `addSidecarPathV33`
+    /// so future encrypted-column extensions stay one-liners.
+    private static func addColumnIfMissing(
+        _ db: Database,
+        table: String,
+        column: String,
+        definition: String
+    ) throws {
+        let existing = try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
+        let hasColumn = existing.contains { ($0["name"] as String?) == column }
+        guard !hasColumn else { return }
+        try db.execute(sql: "ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+    }
 }

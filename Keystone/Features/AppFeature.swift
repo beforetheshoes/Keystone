@@ -852,8 +852,36 @@ struct AppFeature {
                 let recompute: Effect<Action> = (touchedProtection || touchedRelation)
                     ? .send(.recomputeHiddenSet)
                     : .none
+                let valueLowered = value.lowercased()
+                let toggledOn = touchedProtection
+                    && (valueLowered == "true" || valueLowered == "1" || valueLowered == "yes")
+                let toggledOff = touchedProtection && !toggledOn
                 return .merge(
-                    .run { _ in try? dbClient.updatePropertyValue(recordID, key, value) },
+                    .run { _ in
+                        try? dbClient.updatePropertyValue(recordID, key, value)
+                        // After the plaintext write lands, decide whether
+                        // we owe an encryption pass:
+                        //   • toggledOn → run the bulk encryptor over
+                        //     the toggled record AND every cascade
+                        //     dependent (children, grandchildren, …)
+                        //     so an Activity referencing a freshly-
+                        //     protected Trip gets encrypted in the
+                        //     same tick.
+                        //   • toggledOff → decrypt back to plaintext,
+                        //     same cascade.
+                        //   • otherwise: re-encrypt this row only,
+                        //     so a normal edit to a protected record
+                        //     re-tightens its storage.
+                        if toggledOn {
+                            let cascade = (try? dbClient.cascadeFromSeed(recordID)) ?? Set([recordID])
+                            for r in cascade { try? dbClient.encryptRecord(r) }
+                        } else if toggledOff {
+                            let cascade = (try? dbClient.cascadeFromSeed(recordID)) ?? Set([recordID])
+                            for r in cascade { try? dbClient.decryptRecord(r) }
+                        } else if (try? dbClient.recordIsEncrypted(recordID)) == true {
+                            try? dbClient.encryptRecord(recordID)
+                        }
+                    },
                     recompute
                 )
 
@@ -1170,13 +1198,18 @@ struct AppFeature {
 
             case let .openAsset(assetID):
                 guard let asset = state.currentRecordAssets.first(where: { $0.id == assetID }) else { return .none }
-                let url = asset.absoluteURL
                 return .run { _ in
+                    // Encrypted assets resolve through the dependency
+                    // so the on-disk ciphertext doesn't leak to a
+                    // viewer that expects original bytes; plaintext
+                    // assets short-circuit to their actual URL with
+                    // no copy.
+                    let resolved = (try? dbClient.assetDecryptedURL(assetID)) ?? asset.absoluteURL
                     await MainActor.run {
                         #if canImport(AppKit)
-                        _ = NSWorkspace.shared.open(url)
+                        _ = NSWorkspace.shared.open(resolved)
                         #elseif canImport(UIKit)
-                        UIApplication.shared.open(url)
+                        UIApplication.shared.open(resolved)
                         #endif
                     }
                 }
@@ -1187,13 +1220,13 @@ struct AppFeature {
                 // iOS doesn't have an equivalent floating preview, so
                 // fall back to the regular open path.
                 guard let asset = state.currentRecordAssets.first(where: { $0.id == assetID }) else { return .none }
-                let url = asset.absoluteURL
                 return .run { _ in
+                    let resolved = (try? dbClient.assetDecryptedURL(assetID)) ?? asset.absoluteURL
                     await MainActor.run {
                         #if canImport(AppKit)
-                        QuickLookManager.shared.present(urls: [url])
+                        QuickLookManager.shared.present(urls: [resolved])
                         #elseif canImport(UIKit)
-                        UIApplication.shared.open(url)
+                        UIApplication.shared.open(resolved)
                         #endif
                     }
                 }

@@ -160,7 +160,8 @@ enum AssetImporter {
             fileExtension: ext.isEmpty ? nil : ext,
             byteSize: byteSize,
             contentHash: hashHex,
-            createdAt: now
+            createdAt: now,
+            isEncrypted: false
         )
     }
 
@@ -257,7 +258,8 @@ enum AssetImporter {
             fileExtension: ext.isEmpty ? nil : ext,
             byteSize: byteSize,
             contentHash: hashHex,
-            createdAt: now
+            createdAt: now,
+            isEncrypted: false
         )
     }
 }
