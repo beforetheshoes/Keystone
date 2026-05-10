@@ -113,8 +113,14 @@ targets:
         com.apple.developer.ubiquity-container-identifiers:
           - iCloud.com.ryanleewilliams.keystone
         # APS env for CloudKit push notifications (silent change pushes).
-        aps-environment: development
-        com.apple.developer.aps-environment: development
+        # `production` here means both Debug and Release builds talk to
+        # the Production CloudKit environment — schema must be promoted
+        # via the CloudKit Dashboard (Schema → Deploy Schema to
+        # Production) before this works. Switching back to `development`
+        # would re-route to the Dev environment, which has its own
+        # separate schema + record store.
+        aps-environment: production
+        com.apple.developer.aps-environment: production
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryanleewilliams.keystone
