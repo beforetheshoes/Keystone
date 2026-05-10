@@ -128,14 +128,15 @@ struct DatabaseClient: Sendable {
 /// Post-block-write reencryption hooks. After any block-modifying
 /// write inside an encrypted record, re-encrypt the freshly-written
 /// plaintext so storage doesn't drift to a half-encrypted state.
-/// Idempotent on already-encrypted blocks.
+/// Idempotent on already-encrypted blocks. The encryptor is built
+/// per-record from the provider so each record uses its own key.
 @Sendable private func reencryptBlocksIfRecordProtected(
     _ db: Database,
     recordID: String,
-    encryptor: ValueEncryptor
+    provider: ValueEncryptorProvider
 ) throws {
     guard try DBWrites.recordIsEncrypted(db, recordID: recordID) else { return }
-    try DBWrites.encryptRecordBlocks(db, recordID: recordID, encryptor: encryptor)
+    try DBWrites.encryptRecordBlocks(db, recordID: recordID, encryptor: provider(recordID))
 }
 
 /// Same hook keyed by blockID — looks up the parent record before
@@ -143,42 +144,34 @@ struct DatabaseClient: Sendable {
 @Sendable private func reencryptBlocksForBlockIfProtected(
     _ db: Database,
     blockID: String,
-    encryptor: ValueEncryptor
+    provider: ValueEncryptorProvider
 ) throws {
     guard let recID = try String.fetchOne(
         db,
         sql: "SELECT record_id FROM blocks WHERE id = ?",
         arguments: [blockID]
     ) else { return }
-    try reencryptBlocksIfRecordProtected(db, recordID: recID, encryptor: encryptor)
+    try reencryptBlocksIfRecordProtected(db, recordID: recID, provider: provider)
 }
 
 extension DatabaseClient: DependencyKey {
     static let liveValue: DatabaseClient = {
-        // Build a single ValueEncryptor bound to the live ProtectionKeyClient
-        // and reuse it across reads/writes — captures avoid the @Dependency
-        // lookup overhead per call and keep the dep boundary explicit.
+        // Per-record encryption: each call site that has a recordID
+        // builds a `ValueEncryptor` bound to that ID. Multi-record
+        // reads receive the provider closure so they can resolve
+        // per-row.
         @Dependency(\.protectionKeyClient) var keys
-        let encryptor = ValueEncryptor(
-            encrypt: { plain in try keys.encrypt(Data(plain.utf8)) },
-            decrypt: { cipher in
-                let data = try keys.decrypt(cipher)
-                guard let s = String(data: data, encoding: .utf8) else {
-                    throw ValueEncryptor.EncryptorError.nonUTF8
-                }
-                return s
-            }
-        )
+        let provider: ValueEncryptorProvider = ValueEncryptor.liveProvider(keys: keys)
 
         return DatabaseClient(
         areas:           { try dbRead { try DBReads.areas($0) } },
         databases:       { try dbRead { try DBReads.databases($0) } },
         database:        { id in try dbRead { try DBReads.database($0, id: id) } },
         properties:      { dbID in try dbRead { try DBReads.properties($0, databaseID: dbID) } },
-        records:         { dbID, excluding in try dbRead { try DBReads.records($0, databaseID: dbID, excluding: excluding, encryptor: encryptor) } },
-        record:          { id in try dbRead { try DBReads.record($0, id: id, encryptor: encryptor) } },
+        records:         { dbID, excluding in try dbRead { try DBReads.records($0, databaseID: dbID, excluding: excluding, encryptorProvider: provider) } },
+        record:          { id in try dbRead { try DBReads.record($0, id: id, encryptor: provider(id)) } },
         propertyJSON:    { recID, key in try dbRead { try DBReads.propertyJSON($0, recordID: recID, propertyKey: key) } },
-        relatedRecords:  { id, excluding in try dbRead { try DBReads.relatedRecords($0, sourceID: id, excluding: excluding, encryptor: encryptor) } },
+        relatedRecords:  { id, excluding in try dbRead { try DBReads.relatedRecords($0, sourceID: id, excluding: excluding, encryptorProvider: provider) } },
         paletteItems:    { excluding in try dbRead { try DBReads.paletteItems($0, excluding: excluding) } },
         protectedHiddenIDs: { unlocked, active in try dbRead { try ProtectedReads.hiddenRecordIDs($0, unlocked: unlocked, filteringActive: active) } },
         allProtectedSeedIDs: { try dbRead { try ProtectedReads.allProtectedSeedIDs($0) } },
@@ -187,16 +180,22 @@ extension DatabaseClient: DependencyKey {
         recordIsEncrypted: { recID in try dbRead { try DBWrites.recordIsEncrypted($0, recordID: recID) } },
         encryptRecord: { recID in
             try dbWrite { db in
-                try DBWrites.encryptRecordValues(db, recordID: recID, encryptor: encryptor)
-                try DBWrites.encryptRecordBlocks(db, recordID: recID, encryptor: encryptor)
-                try DBWrites.encryptRecordAssets(db, recordID: recID, encryptor: encryptor)
+                let enc = provider(recID)
+                try DBWrites.encryptRecordValues(db, recordID: recID, encryptor: enc)
+                try DBWrites.encryptRecordBlocks(db, recordID: recID, encryptor: enc)
+                try DBWrites.encryptRecordAssets(db, recordID: recID, encryptor: enc)
             }
         },
         decryptRecord: { recID in
             try dbWrite { db in
-                try DBWrites.decryptRecordValues(db, recordID: recID, encryptor: encryptor)
-                try DBWrites.decryptRecordBlocks(db, recordID: recID, encryptor: encryptor)
-                try DBWrites.decryptRecordAssets(db, recordID: recID, encryptor: encryptor)
+                let enc = provider(recID)
+                try DBWrites.decryptRecordValues(db, recordID: recID, encryptor: enc)
+                try DBWrites.decryptRecordBlocks(db, recordID: recID, encryptor: enc)
+                try DBWrites.decryptRecordAssets(db, recordID: recID, encryptor: enc)
+                // Once the record is fully decrypted, drop its key from
+                // the keychain — the record is no longer protected and
+                // future writes will land as plaintext.
+                try? keys.deleteRecordKey(recID)
             }
         },
         assetDecryptedURL: { assetID in
@@ -207,7 +206,10 @@ extension DatabaseClient: DependencyKey {
                         userInfo: [NSLocalizedDescriptionKey: "Asset not found: \(assetID)"]
                     )
                 }
-                return try EncryptedAssetReader.decryptedURL(for: asset, encryptor: encryptor)
+                return try EncryptedAssetReader.decryptedURL(
+                    for: asset,
+                    encryptor: provider(asset.recordID ?? "")
+                )
             }
         },
         createRecord:    { dbID, title in try dbWrite { try DBWrites.createRecord($0, databaseID: dbID, title: title) } },
@@ -217,36 +219,36 @@ extension DatabaseClient: DependencyKey {
         deleteAllRecordsInDatabase: { dbID in try dbWrite { try DBWrites.deleteAllRecordsInDatabase($0, databaseID: dbID) } },
         changeRecordDatabase: { id, newDB in try dbWrite { try DBWrites.changeRecordDatabase($0, recordID: id, newDatabaseID: newDB) } },
         setPropertyAlignment: { propID, alignment in try dbWrite { try DBWrites.setPropertyAlignment($0, propertyID: propID, alignment: alignment) } },
-        blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id, encryptor: encryptor) } },
+        blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id, encryptor: provider(id)) } },
         createBlock:     { rid, after, kind, text, checked in
             try dbWrite { db in
                 let row = try DBWrites.createBlock(db, recordID: rid, after: after, kind: kind, text: text, checked: checked)
-                try reencryptBlocksIfRecordProtected(db, recordID: rid, encryptor: encryptor)
+                try reencryptBlocksIfRecordProtected(db, recordID: rid, provider: provider)
                 return row
             }
         },
         updateBlockText: { id, text in
             try dbWrite { db in
                 try DBWrites.updateBlockText(db, blockID: id, text: text)
-                try reencryptBlocksForBlockIfProtected(db, blockID: id, encryptor: encryptor)
+                try reencryptBlocksForBlockIfProtected(db, blockID: id, provider: provider)
             }
         },
         updateBlockKind: { id, kind, text in
             try dbWrite { db in
                 try DBWrites.updateBlockKind(db, blockID: id, kind: kind, text: text)
-                try reencryptBlocksForBlockIfProtected(db, blockID: id, encryptor: encryptor)
+                try reencryptBlocksForBlockIfProtected(db, blockID: id, provider: provider)
             }
         },
         updateBlockChecked: { id, checked in
             try dbWrite { db in
                 try DBWrites.updateBlockChecked(db, blockID: id, checked: checked)
-                try reencryptBlocksForBlockIfProtected(db, blockID: id, encryptor: encryptor)
+                try reencryptBlocksForBlockIfProtected(db, blockID: id, provider: provider)
             }
         },
         updateBlockTable: { id, table in
             try dbWrite { db in
                 try DBWrites.updateBlockTable(db, blockID: id, table: table)
-                try reencryptBlocksForBlockIfProtected(db, blockID: id, encryptor: encryptor)
+                try reencryptBlocksForBlockIfProtected(db, blockID: id, provider: provider)
             }
         },
         deleteBlock:     { id in try dbWrite { try DBWrites.deleteBlock($0, blockID: id) } },

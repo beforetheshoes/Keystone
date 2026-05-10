@@ -66,21 +66,38 @@ extension DependencyValues {
         // server-side mismatch. Loud log so the user can find this in
         // Console.app if they wonder why sync is silent.
         do {
+            // CKShare cross-user sharing (#14): only `Record` is a
+            // shareable root. Its single-FK children
+            // (`PropertyValueRow`, `Block`, `AssetRow`) follow the
+            // record into a share zone via sqlite-data's
+            // parent-FK-routing trigger (see
+            // `SQLiteData/CloudKit/Internal/Triggers.swift`).
+            //
+            // `privateTables:` are synchronized but force-pinned to the
+            // default zone — they never become share roots and never
+            // follow a parent into a share zone. Workspace-level
+            // metadata (workspaces, areas, databases, properties,
+            // tags, views) lives there. RelationRow + RecordTag also
+            // sit private for v1: they have multi-FK shapes that
+            // wouldn't follow records into a share zone anyway, and
+            // recipients don't need our local tags / cross-DB
+            // relations to read a shared record's body.
             defaultSyncEngine = try SyncEngine(
                 for: writer,
                 tables:
+                    Record.self,
+                    PropertyValueRow.self,
+                    Block.self,
+                    AssetRow.self,
+                privateTables:
                     Workspace.self,
                     Area.self,
                     ObjectDatabase.self,
                     PropertyDef.self,
-                    Record.self,
-                    PropertyValueRow.self,
-                    Block.self,
                     TagRow.self,
                     RecordTag.self,
                     RelationRow.self,
                     ViewDef.self,
-                    AssetRow.self,
                 containerIdentifier: CloudKitConfig.containerIdentifier,
                 logger: Logger(subsystem: "Keystone", category: "CloudKit")
             )
@@ -92,6 +109,14 @@ extension DependencyValues {
             )
             return
         }
+
+        // Per-record protection-key rotation (#14). Idempotent + cheap
+        // when nothing to do (one Keychain read returns nil → early
+        // return). Runs before SyncMetadata seeding so the re-encrypted
+        // ciphertext is what the touch-update broadcasts to CloudKit,
+        // not the soon-to-be-stale workspace-key form.
+        @Dependency(\.protectionKeyClient) var keys
+        ProtectionKeyRotation.runIfNeeded(writer: writer, keys: keys)
 
         // Backfill `SyncMetadata` for rows inserted before `SyncEngine`
         // attached its triggers (e.g. seed rows, or any direct

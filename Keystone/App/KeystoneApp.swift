@@ -27,6 +27,12 @@ struct KeystoneEntry {
 struct KeystoneApp: App {
     @State private var store: StoreOf<AppFeature>
 
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(KeystoneAppDelegate.self) private var appDelegate
+    #elseif os(iOS)
+    @UIApplicationDelegateAdaptor(KeystoneAppDelegate.self) private var appDelegate
+    #endif
+
     init() {
         let isTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let disableSync = ProcessInfo.processInfo.environment["KEYSTONE_DISABLE_CLOUDKIT"] == "1"
@@ -60,9 +66,19 @@ struct KeystoneApp: App {
                 fatalError("Failed to bootstrap Keystone database: \(error)")
             }
         }
-        _store = State(wrappedValue: Store(initialState: AppFeature.State()) {
+        let store = Store(initialState: AppFeature.State()) {
             AppFeature()
-        })
+        }
+        _store = State(wrappedValue: store)
+
+        // Register the share-acceptance handler so the OS-vended
+        // delegate callback can dispatch into the TCA store. Captures
+        // `store` by reference since `Store` is a class.
+        ShareAcceptInbox.handler = { @Sendable [store] metadata in
+            Task { @MainActor in
+                store.send(.shareAccepted(metadata: metadata))
+            }
+        }
     }
 
     var body: some Scene {

@@ -7,71 +7,118 @@ import DependenciesMacros
 /// Protocol for the underlying secret storage. The live impl talks to the
 /// system Keychain; tests inject an in-memory replacement so they don't
 /// pollute the real keychain or require iCloud Keychain Sync.
+///
+/// Items are addressed by `(service, account)` — service identifies the
+/// purpose (workspace key vs per-record key), account identifies the
+/// instance (constant `"master"` for the legacy workspace key, the
+/// `record_id` for per-record keys).
 protocol ProtectionKeyStore: Sendable {
-    /// Read the persisted 32-byte key, or nil if it hasn't been
-    /// generated yet. Throws on Keychain errors that aren't
-    /// "item not found" (which is `nil`, not an error).
-    func read() throws -> Data?
-    /// Persist a 32-byte key. Existing item is replaced.
-    func write(_ data: Data) throws
-    /// Remove the stored key entirely. Used by tests + the future
-    /// "rotate keys" / "delete protection" paths.
-    func delete() throws
+    func read(service: String, account: String) throws -> Data?
+    func write(_ data: Data, service: String, account: String) throws
+    func delete(service: String, account: String) throws
 }
 
 /// CryptoKit + Keychain dependency that backs the privacy-lock
-/// encryption-at-rest layer. One symmetric key per user, generated on
-/// demand and persisted in the Keychain.
+/// encryption-at-rest layer. v1 of #9 used a single workspace-wide
+/// symmetric key. CKShare cross-user sharing (#14) required moving to
+/// **per-record symmetric keys** so that sharing one protected record
+/// hands the recipient only that record's key — never any other
+/// protected record's data.
+///
+/// **Storage layout:**
+///
+/// - Per-record keys live under
+///   `kSecAttrService = "com.ryanleewilliams.keystone.record-key"`,
+///   `kSecAttrAccount = <recordID>`. iCloud-Keychain-synced so the
+///   owner's other devices automatically get the same keys.
+/// - The legacy workspace key (#9 vintage) lives under
+///   `kSecAttrService = "com.ryanleewilliams.keystone.protection-key"`,
+///   `kSecAttrAccount = "master"`. Read by the one-shot rotation job in
+///   `Bootstrap.runProtectionKeyRotationIfNeeded`; deleted at the end
+///   of rotation. Its absence is the durable signal that rotation is
+///   complete on this account.
 ///
 /// **iCloud Keychain Sync**: items are written with
 /// `kSecAttrSynchronizable = true` and `kSecAttrAccessibleAfterFirstUnlock`
-/// — required for sync-eligible items. This means: any device signed
-/// into the same iCloud account with iCloud Keychain enabled
-/// automatically gets the key and can decrypt records. Devices without
-/// iCloud Keychain see a per-device key (same access flags, just no
-/// cross-device propagation), and protected records won't decrypt on
-/// secondary devices until the user re-syncs Keychain.
+/// — required for sync-eligible items. Devices signed into the same
+/// iCloud account with iCloud Keychain enabled automatically replicate
+/// keys, so a record encrypted on Mac1 decrypts on Mac2 once the
+/// keychain syncs.
 ///
-/// **Biometric**: The Keychain item itself is NOT biometric-gated
-/// (because `.biometryCurrentSet` is incompatible with sync). The
-/// app's `BiometricAuthClient` gates access at the UI layer instead —
-/// the user has to authenticate through `AppFeature` before this
-/// client will be invoked. This matches the threat model documented
-/// in the privacy help doc: defends against off-device attackers
-/// (leaked iCloud Drive folder, recovered backup, breached CloudKit
-/// zone) but does NOT defend against an unlocked device + working
-/// biometric.
+/// **Biometric**: Keychain items are NOT biometric-gated
+/// (`.biometryCurrentSet` is incompatible with sync). The app's
+/// `BiometricAuthClient` gates access at the UI layer. Threat model
+/// matches #9: defends against off-device attackers (leaked iCloud
+/// Drive folder, recovered backup, breached CloudKit zone) but does
+/// NOT defend against an unlocked device + working biometric.
 @DependencyClient
 struct ProtectionKeyClient: Sendable {
-    /// True when we have a key on file. UI uses this to decide whether
-    /// "encrypt now" needs to generate one or just unlock an existing.
-    var hasKey: @Sendable () -> Bool = { false }
-    /// Fetch the existing key. Returns nil if none has been generated
-    /// yet — caller decides whether to create or fail.
-    var loadKey: @Sendable () throws -> SymmetricKey?
-    /// Get-or-create the key. Used by the encryption write path.
-    var ensureKey: @Sendable () throws -> SymmetricKey
-    /// Encrypt arbitrary bytes with AES-GCM. Output is the combined
-    /// representation: nonce ‖ ciphertext ‖ tag, ready to round-trip
-    /// through SQLite's BLOB column without separate framing.
-    var encrypt: @Sendable (_ plaintext: Data) throws -> Data
-    /// Decrypt bytes produced by `encrypt`. Throws on any tampering /
-    /// missing-key / wrong-key.
-    var decrypt: @Sendable (_ ciphertext: Data) throws -> Data
-    /// Wipe the stored key. Reserved for tests + future
-    /// "delete all protected data" UX. Does NOT decrypt existing
-    /// protected records — the caller must run the full decrypt pass
-    /// first or accept that protected content becomes unrecoverable.
-    var resetKey: @Sendable () throws -> Void
+    // MARK: - Per-record keys (the v1 surface used by all encrypt/decrypt)
+
+    /// Get-or-create a symmetric key for `recordID`. Always succeeds:
+    /// generates a fresh AES-256-GCM key on first call and stores it in
+    /// iCloud Keychain. Idempotent across the user's devices because
+    /// the keychain item syncs.
+    var recordKey: @Sendable (_ recordID: String) throws -> SymmetricKey
+
+    /// Store an externally-supplied key under `recordID`. Used by the
+    /// share-acceptance path: when a CKShare carries
+    /// `encryptedValues["keystone_record_key"]`, the recipient calls
+    /// this to install the key locally so subsequent reads decrypt.
+    var installRecordKey: @Sendable (_ recordID: String, _ keyData: Data) throws -> Void
+
+    /// Remove a record's key entirely. Called when a record's
+    /// `is_protected` toggles back to false — once decrypt-then-clear
+    /// has run, no future encryption will need this key.
+    var deleteRecordKey: @Sendable (_ recordID: String) throws -> Void
+
+    /// Encrypt UTF-8 plaintext under `recordID`'s key. Output is the
+    /// AES-GCM combined representation (nonce ‖ ct ‖ tag). Generates
+    /// the key on first call.
+    var encryptForRecord: @Sendable (_ recordID: String, _ plaintext: Data) throws -> Data
+
+    /// Decrypt ciphertext for `recordID`. Tries the per-record key
+    /// first; if that fails AND a legacy workspace key still exists in
+    /// the keychain (mid-rotation), retries with the workspace key so
+    /// not-yet-rotated rows still read correctly. Once rotation
+    /// completes the workspace key is gone and only the per-record
+    /// path runs.
+    var decryptForRecord: @Sendable (_ recordID: String, _ ciphertext: Data) throws -> Data
+
+    /// True iff a per-record key exists for `recordID`. Used by the
+    /// share path to decide whether to wrap a key into the CKShare.
+    var hasRecordKey: @Sendable (_ recordID: String) -> Bool = { _ in false }
+
+    /// Read the raw key bytes for `recordID` so the share path can wrap
+    /// them into `CKShare.encryptedValues`. Returns nil if no key
+    /// exists yet (record was never encrypted).
+    var exportRecordKey: @Sendable (_ recordID: String) throws -> Data?
+
+    // MARK: - Legacy workspace key (rotation-only)
+
+    /// Returns the legacy workspace key if it still exists, nil
+    /// otherwise. Nil is the durable signal that rotation has completed
+    /// on this account (the keychain item, once deleted, syncs the
+    /// deletion to every other device of the same iCloud account).
+    var legacyWorkspaceKey: @Sendable () throws -> SymmetricKey?
+
+    /// Wipe the legacy workspace key. Called at the end of the
+    /// `Bootstrap.runProtectionKeyRotationIfNeeded` job, after every
+    /// pre-existing protected row has been re-encrypted under its
+    /// per-record key.
+    var dropLegacyWorkspaceKey: @Sendable () throws -> Void
 }
 
 extension ProtectionKeyClient {
-    /// Errors callers can pattern-match on.
     enum Error: Swift.Error, Equatable {
         case keychainStatus(OSStatus)
         case keychainItemMissing
         case decryptFailed
     }
+
+    static let recordKeyService = "com.ryanleewilliams.keystone.record-key"
+    static let workspaceKeyService = "com.ryanleewilliams.keystone.protection-key"
+    static let workspaceKeyAccount = "master"
 }
 
 extension ProtectionKeyClient: DependencyKey {
@@ -87,53 +134,82 @@ extension ProtectionKeyClient: DependencyKey {
         store: InMemoryProtectionKeyStore()
     )
 
-    /// Shared factory used by both liveValue and testValue. Pulled out
-    /// so the encrypt/decrypt closures don't have to be duplicated and
-    /// the test store can exercise the exact same code path.
+    /// Shared factory used by both liveValue and testValue.
     static func makeClient(store: ProtectionKeyStore) -> ProtectionKeyClient {
-        return ProtectionKeyClient(
-            hasKey: {
-                (try? store.read()) ?? nil != nil
-            },
-            loadKey: {
-                guard let raw = try store.read() else { return nil }
+        // Internal helpers — closed-over by the closures below.
+        @Sendable func ensureRecord(_ recordID: String) throws -> SymmetricKey {
+            if let raw = try store.read(service: recordKeyService, account: recordID) {
                 return SymmetricKey(data: raw)
+            }
+            let key = SymmetricKey(size: .bits256)
+            let data = key.withUnsafeBytes { Data($0) }
+            try store.write(data, service: recordKeyService, account: recordID)
+            return key
+        }
+
+        @Sendable func loadRecord(_ recordID: String) throws -> SymmetricKey? {
+            guard let raw = try store.read(service: recordKeyService, account: recordID) else {
+                return nil
+            }
+            return SymmetricKey(data: raw)
+        }
+
+        @Sendable func loadWorkspace() throws -> SymmetricKey? {
+            guard let raw = try store.read(service: workspaceKeyService, account: workspaceKeyAccount) else {
+                return nil
+            }
+            return SymmetricKey(data: raw)
+        }
+
+        return ProtectionKeyClient(
+            recordKey: { recordID in
+                try ensureRecord(recordID)
             },
-            ensureKey: {
-                if let raw = try store.read() {
-                    return SymmetricKey(data: raw)
-                }
-                let key = SymmetricKey(size: .bits256)
-                try key.withUnsafeBytes { try store.write(Data($0)) }
-                return key
+            installRecordKey: { recordID, keyData in
+                try store.write(keyData, service: recordKeyService, account: recordID)
             },
-            encrypt: { plaintext in
-                let raw = try store.read() ?? {
-                    let key = SymmetricKey(size: .bits256)
-                    try key.withUnsafeBytes { try store.write(Data($0)) }
-                    return key.withUnsafeBytes { Data($0) }
-                }()
-                let key = SymmetricKey(data: raw)
+            deleteRecordKey: { recordID in
+                try store.delete(service: recordKeyService, account: recordID)
+            },
+            encryptForRecord: { recordID, plaintext in
+                let key = try ensureRecord(recordID)
                 let sealed = try AES.GCM.seal(plaintext, using: key)
                 guard let combined = sealed.combined else {
                     throw Error.decryptFailed
                 }
                 return combined
             },
-            decrypt: { ciphertext in
-                guard let raw = try store.read() else {
-                    throw Error.keychainItemMissing
+            decryptForRecord: { recordID, ciphertext in
+                // Per-record key first. Mid-rotation rows may still be
+                // workspace-key-encrypted; fall back if the per-record
+                // open throws.
+                if let key = try loadRecord(recordID) {
+                    if let sealed = try? AES.GCM.SealedBox(combined: ciphertext),
+                       let plain = try? AES.GCM.open(sealed, using: key) {
+                        return plain
+                    }
                 }
-                let key = SymmetricKey(data: raw)
-                do {
-                    let sealed = try AES.GCM.SealedBox(combined: ciphertext)
-                    return try AES.GCM.open(sealed, using: key)
-                } catch {
-                    throw Error.decryptFailed
+                if let workspace = try loadWorkspace() {
+                    do {
+                        let sealed = try AES.GCM.SealedBox(combined: ciphertext)
+                        return try AES.GCM.open(sealed, using: workspace)
+                    } catch {
+                        throw Error.decryptFailed
+                    }
                 }
+                throw Error.keychainItemMissing
             },
-            resetKey: {
-                try store.delete()
+            hasRecordKey: { recordID in
+                ((try? store.read(service: recordKeyService, account: recordID)) ?? nil) != nil
+            },
+            exportRecordKey: { recordID in
+                try store.read(service: recordKeyService, account: recordID)
+            },
+            legacyWorkspaceKey: {
+                try loadWorkspace()
+            },
+            dropLegacyWorkspaceKey: {
+                try store.delete(service: workspaceKeyService, account: workspaceKeyAccount)
             }
         )
     }
@@ -153,20 +229,17 @@ extension DependencyValues {
 /// compatible with `kSecAttrSynchronizable=true` — `…ThisDeviceOnly`
 /// variants reject sync.
 struct SecItemProtectionKeyStore: ProtectionKeyStore {
-    static let serviceName = "com.ryanleewilliams.keystone.protection-key"
-    static let accountName = "master"
-
-    private var baseQuery: [String: Any] {
+    private func baseQuery(service: String, account: String) -> [String: Any] {
         [
             kSecClass as String:                 kSecClassGenericPassword,
-            kSecAttrService as String:           Self.serviceName,
-            kSecAttrAccount as String:           Self.accountName,
+            kSecAttrService as String:           service,
+            kSecAttrAccount as String:           account,
             kSecAttrSynchronizable as String:    true,
         ]
     }
 
-    func read() throws -> Data? {
-        var query = baseQuery
+    func read(service: String, account: String) throws -> Data? {
+        var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -182,10 +255,8 @@ struct SecItemProtectionKeyStore: ProtectionKeyStore {
         }
     }
 
-    func write(_ data: Data) throws {
-        // Try update first; fall back to add on item-not-found. Same
-        // upsert pattern used by APIKeys.SecItemKeychainStore.
-        let updateQuery = baseQuery
+    func write(_ data: Data, service: String, account: String) throws {
+        let updateQuery = baseQuery(service: service, account: account)
         let attributesToUpdate: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(updateQuery as CFDictionary, attributesToUpdate as CFDictionary)
         if updateStatus == errSecSuccess { return }
@@ -193,7 +264,7 @@ struct SecItemProtectionKeyStore: ProtectionKeyStore {
             throw ProtectionKeyClient.Error.keychainStatus(updateStatus)
         }
 
-        var addQuery = baseQuery
+        var addQuery = baseQuery(service: service, account: account)
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
@@ -202,31 +273,40 @@ struct SecItemProtectionKeyStore: ProtectionKeyStore {
         }
     }
 
-    func delete() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
+    func delete(service: String, account: String) throws {
+        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             throw ProtectionKeyClient.Error.keychainStatus(status)
         }
     }
 }
 
-/// In-memory store used by tests (and by the testValue dependency).
-/// Atomic via NSLock so a write from one async task can't race a read
-/// from another.
+/// In-memory store used by tests + the testValue dependency. Atomic via
+/// NSLock so a write from one async task can't race a read from another.
 final class InMemoryProtectionKeyStore: ProtectionKeyStore, @unchecked Sendable {
-    private var data: Data?
+    private var items: [String: Data] = [:]
     private let lock = NSLock()
 
-    func read() throws -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        return data
+    private func key(service: String, account: String) -> String {
+        "\(service)|\(account)"
     }
-    func write(_ data: Data) throws {
+
+    func read(service: String, account: String) throws -> Data? {
         lock.lock(); defer { lock.unlock() }
-        self.data = data
+        return items[key(service: service, account: account)]
     }
-    func delete() throws {
+
+    func write(_ data: Data, service: String, account: String) throws {
         lock.lock(); defer { lock.unlock() }
-        self.data = nil
+        items[key(service: service, account: account)] = data
+    }
+
+    func delete(service: String, account: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        items[key(service: service, account: account)] = nil
     }
 }
+
+private let recordKeyService = ProtectionKeyClient.recordKeyService
+private let workspaceKeyService = ProtectionKeyClient.workspaceKeyService
+private let workspaceKeyAccount = ProtectionKeyClient.workspaceKeyAccount

@@ -1,6 +1,9 @@
 import Foundation
 import ComposableArchitecture
 @preconcurrency import SQLiteData
+#if canImport(CloudKit)
+import CloudKit
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -108,6 +111,37 @@ struct AppFeature {
         /// Suppresses duplicate prompts if the user double-taps the
         /// unlock button. Cleared on completion / cancel.
         var authInFlight: Bool = false
+
+        // Sharing (#14)
+
+        /// Non-nil when the user has tapped "Share record…" and the
+        /// CKShare prep is in flight. Drives the busy spinner in the
+        /// menu and dedupes double-taps.
+        var sharePreparingRecordID: String? = nil
+
+        /// Non-nil when a `SharedRecord` has been minted and is ready
+        /// for the platform-specific sharing controller to present.
+        /// The view observes this and binds it to a sheet — clearing
+        /// the value (via `.shareSheetDismissed`) closes the sheet.
+        var sharePresentingSharedRecord: SharedRecordWrapper? = nil
+
+        /// Non-nil after a share-create error so the user sees what
+        /// went wrong. Cleared when they dismiss the alert / re-try.
+        var shareErrorMessage: String? = nil
+    }
+
+    /// Tiny wrapper around sqlite-data's `SharedRecord` so it satisfies
+    /// `Equatable + Sendable` for `@ObservableState`. `SharedRecord` is
+    /// already `Hashable + Sendable`, but the `@ObservableState` macro
+    /// expansion needs a wrapper around CloudKit-vended types so the
+    /// state remains structurally simple.
+    struct SharedRecordWrapper: Equatable, Sendable, Identifiable {
+        let recordID: String
+        let sharedRecord: SharedRecord
+        var id: String { recordID }
+        static func == (lhs: SharedRecordWrapper, rhs: SharedRecordWrapper) -> Bool {
+            lhs.recordID == rhs.recordID && lhs.sharedRecord == rhs.sharedRecord
+        }
     }
 
     struct LookupSheetState: Equatable {
@@ -320,6 +354,27 @@ struct AppFeature {
         /// Internal — auth finished. `success=true` flips the relevant
         /// state slot; `false` only clears `authInFlight`.
         case authCompleted(scope: AuthScope, success: Bool)
+
+        // Sharing (#14)
+        /// User picked "Share record…" from the record toolbar. Kicks
+        /// off the CKShare prep effect.
+        case shareRecordRequested(recordID: String)
+        /// CKShare ready — view binds to the wrapper and presents the
+        /// platform sharing controller.
+        case shareRecordReady(recordID: String, sharedRecord: SharedRecord)
+        /// Share creation failed. Surfaces in an alert.
+        case shareRecordFailed(message: String)
+        /// View dismissed the sharing controller — clear the wrapper
+        /// so the next share attempt starts fresh.
+        case shareSheetDismissed
+        /// User dismissed the share-error alert.
+        case shareErrorDismissed
+        /// User accepted an incoming CKShare via the OS share-handoff
+        /// hooks (NSApplication on macOS, scene delegate on iOS).
+        case shareAccepted(metadata: CKShare.Metadata)
+        /// Internal — `acceptShare` finished. Logged + ignored at the
+        /// reducer level; the SyncEngine starts pulling the shared row.
+        case shareAcceptCompleted(success: Bool)
     }
 
     /// Distinguishes which auth challenge a result is responding to,
@@ -1334,6 +1389,57 @@ struct AppFeature {
                     state.unlockedRecordIDs.formUnion(state.protectedSeedIDs)
                     return .send(.recomputeHiddenSet)
                 }
+
+            case let .shareRecordRequested(recordID):
+                guard state.sharePreparingRecordID == nil else { return .none }
+                state.sharePreparingRecordID = recordID
+                state.shareErrorMessage = nil
+                return .run { [syncClient] send in
+                    do {
+                        let shared = try await syncClient.shareRecord(recordID)
+                        await send(.shareRecordReady(recordID: recordID, sharedRecord: shared))
+                    } catch {
+                        await send(.shareRecordFailed(message: error.localizedDescription))
+                    }
+                }
+
+            case let .shareRecordReady(recordID, sharedRecord):
+                state.sharePreparingRecordID = nil
+                state.sharePresentingSharedRecord = SharedRecordWrapper(
+                    recordID: recordID,
+                    sharedRecord: sharedRecord
+                )
+                return .none
+
+            case let .shareRecordFailed(message):
+                state.sharePreparingRecordID = nil
+                state.shareErrorMessage = message
+                return .none
+
+            case .shareSheetDismissed:
+                state.sharePresentingSharedRecord = nil
+                return .none
+
+            case .shareErrorDismissed:
+                state.shareErrorMessage = nil
+                return .none
+
+            case let .shareAccepted(metadata):
+                return .run { [syncClient] send in
+                    do {
+                        try await syncClient.acceptShare(metadata)
+                        await send(.shareAcceptCompleted(success: true))
+                    } catch {
+                        await send(.shareAcceptCompleted(success: false))
+                    }
+                }
+
+            case .shareAcceptCompleted:
+                // No state mutation — the SyncEngine starts pulling
+                // the shared record asynchronously and the existing
+                // sync-status observation surfaces it. Logged via the
+                // CloudKit subsystem.
+                return .none
             }
         }
     }

@@ -55,6 +55,13 @@ struct RecordDetailView: View {
                         }
                         Divider()
                     }
+                    if shareEnabled {
+                        Button(sharePreparingThisRecord ? "Preparing share…" : "Share record…") {
+                            store.send(.shareRecordRequested(recordID: record.id))
+                        }
+                        .disabled(sharePreparingThisRecord)
+                        Divider()
+                    }
                     Button("Delete record", role: .destructive) {
                         store.send(.deleteCurrentRecord)
                     }
@@ -165,6 +172,35 @@ struct RecordDetailView: View {
             }
         }
         #endif
+        .sheet(
+            item: Binding(
+                get: { store.sharePresentingSharedRecord },
+                set: { newValue in
+                    if newValue == nil {
+                        store.send(.shareSheetDismissed)
+                    }
+                }
+            )
+        ) { wrapper in
+            CloudShareSheet(
+                sharedRecord: wrapper.sharedRecord,
+                onDismiss: { store.send(.shareSheetDismissed) }
+            )
+            .frame(minWidth: 420, minHeight: 320)
+        }
+        .alert(
+            "Couldn't share record",
+            isPresented: Binding(
+                get: { store.shareErrorMessage != nil },
+                set: { isPresented in
+                    if !isPresented { store.send(.shareErrorDismissed) }
+                }
+            ),
+            actions: {
+                Button("OK", role: .cancel) { store.send(.shareErrorDismissed) }
+            },
+            message: { Text(store.shareErrorMessage ?? "") }
+        )
     }
 
     private func syncDrafts() {
@@ -220,6 +256,25 @@ struct RecordDetailView: View {
     private var isProtectedNow: Bool {
         let raw = (record.values["is_protected"] ?? "").lowercased()
         return raw == "true" || raw == "1" || raw == "yes"
+    }
+
+    /// True when the share menu item should be enabled. Sharing
+    /// requires CloudKit to be configured (so the SyncEngine can
+    /// actually mint a CKShare) and no other share prep currently
+    /// in flight on a different record.
+    private var shareEnabled: Bool {
+        // We don't expose `keystoneSyncEngineConfigured` from the
+        // store, so use the sync status as a proxy: if it's `.local`
+        // the SyncEngine isn't running and `share()` would throw.
+        if case .local = store.syncStatus { return false }
+        if let preparing = store.sharePreparingRecordID, preparing != record.id {
+            return false
+        }
+        return true
+    }
+
+    private var sharePreparingThisRecord: Bool {
+        store.sharePreparingRecordID == record.id
     }
 
     @ViewBuilder

@@ -49,9 +49,11 @@ Removing these would mean moving protected records to an isolated encrypted stor
 
 ### Key management
 
-A 256-bit key is generated on demand and stored in the **iCloud Keychain** (service `com.ryanleewilliams.keystone.protection-key`). Devices signed into the same iCloud account with iCloud Keychain enabled get the key automatically and can decrypt protected records. Devices without iCloud Keychain see a per-device key — protected records won't decrypt there until the user re-enables iCloud Keychain.
+Each protected record has its **own** 256-bit AES-GCM key. Keys live in the **iCloud Keychain** under service `com.ryanleewilliams.keystone.record-key`, keyed by record ID. Devices signed into the same iCloud account with iCloud Keychain enabled receive every key automatically; devices without iCloud Keychain see only the keys generated locally.
 
-Keystone never prompts for a passphrase. The biometric layer (`Settings → Privacy → Require biometric on launch`) is what gates everyday access to the key on this device.
+Per-record keys exist so [sharing](23-sharing.md) a single protected record can hand the recipient just that record's key, never any other protected record's. The first time you launch a build with this version, Keystone runs a one-shot rotation of any pre-existing protected rows that were stored under the old single workspace key — once that completes, the workspace key is wiped from the keychain.
+
+Keystone never prompts for a passphrase. The biometric layer (`Settings → Privacy → Require biometric on launch`) is what gates everyday access to the keys on this device.
 
 ### Threat model
 

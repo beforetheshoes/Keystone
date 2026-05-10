@@ -921,6 +921,28 @@ enum DBWrites {
         return (recordIDs.count, assetIDs.count)
     }
 
+    /// Hard-delete the `databases` row plus every record inside it.
+    /// Replaces the v1-era `ON DELETE CASCADE` on the `records.database_id`
+    /// FK that v36 dropped (records had to become CKShare roots, which
+    /// requires no outgoing FKs).
+    ///
+    /// Without this helper, deleting a databases row leaves its records
+    /// orphaned (their `database_id` points at a row that no longer
+    /// exists). The reads layer JOINs through `databases` so orphans
+    /// stay invisible in UI, but the storage still holds them. Use this
+    /// helper any time you intend to fully remove a database +
+    /// everything inside it.
+    @discardableResult
+    static func deleteDatabaseAndChildren(_ db: Database, databaseID: String) throws -> (deletedRecords: Int, deletedAssets: Int) {
+        let result = try deleteAllRecordsInDatabase(db, databaseID: databaseID)
+        // Properties + views still cascade via their own FKs.
+        try db.execute(
+            sql: "DELETE FROM databases WHERE id = ?",
+            arguments: [databaseID]
+        )
+        return result
+    }
+
     /// Sweep records that have a `.md` asset attached but no editor
     /// blocks, parse the asset's body, and populate the record's NOTES
     /// section with the resulting blocks. Idempotent — records that

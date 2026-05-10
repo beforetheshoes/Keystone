@@ -233,15 +233,15 @@ enum DBReads {
     /// dependents in the cascade) are filtered out at the SQL level so
     /// downstream UI surfaces never see them.
     ///
-    /// `encryptor` is optional: when present (live env via DatabaseClient),
-    /// `enc_value` blobs are decrypted into the values dict; when nil
-    /// (CLI / tests), encrypted rows surface as the literal `[encrypted]`
-    /// placeholder so callers can tell at a glance.
+    /// `encryptorProvider` is optional: when present (live env via
+    /// DatabaseClient), each row's `enc_value` blob is decrypted under
+    /// its own per-record key; when nil (CLI / tests), encrypted rows
+    /// surface as the literal `[encrypted]` placeholder.
     static func records(
         _ db: Database,
         databaseID: String,
         excluding: Set<String> = [],
-        encryptor: ValueEncryptor? = nil
+        encryptorProvider: ValueEncryptorProvider? = nil
     ) throws -> [RecordRow] {
         let recRowsRaw = try Row.fetchAll(db, sql: """
             SELECT r.id, r.database_id, r.title, r.glyph, r.tone, r.sort_index,
@@ -280,7 +280,8 @@ enum DBReads {
             // available; otherwise surface a placeholder so the caller
             // (CLI, tests) can tell the value is intentionally opaque.
             if let enc: Data = row["enc_value"], !enc.isEmpty {
-                if let encryptor, let plain = try? encryptor.decrypt(enc) {
+                if let provider = encryptorProvider,
+                   let plain = try? provider(rid).decrypt(enc) {
                     byRecord[rid, default: [:]][key] = plain
                 } else {
                     byRecord[rid, default: [:]][key] = "[encrypted]"
@@ -534,14 +535,14 @@ enum DBReads {
         _ db: Database,
         sourceID: String,
         excluding: Set<String> = [],
-        encryptor: ValueEncryptor? = nil
+        encryptorProvider: ValueEncryptorProvider? = nil
     ) throws -> [RecordRow] {
         let targetIDs = try String.fetchAll(db, sql: """
             SELECT target_record_id FROM relations WHERE source_record_id = ?
         """, arguments: [sourceID])
         return try targetIDs
             .filter { !excluding.contains($0) }
-            .compactMap { try record(db, id: $0, encryptor: encryptor) }
+            .compactMap { try record(db, id: $0, encryptor: encryptorProvider?($0)) }
     }
 
     static func paletteItems(

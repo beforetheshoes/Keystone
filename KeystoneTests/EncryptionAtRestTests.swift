@@ -27,22 +27,28 @@ final class EncryptionAtRestTests: XCTestCase {
         return row.id
     }
 
-    /// Build a fresh in-memory encryptor (NOT the testValue Keychain).
-    /// Each call generates a new key — perfect for isolation but means
-    /// you can't share an encryptor across `withDB` invocations.
+    /// Hermetic per-test ProtectionKeyClient + helpers for building
+    /// per-record encryptors. Tests pre-#14 used a single workspace
+    /// key; per-record keys are now mandatory so each test instance
+    /// gets its own keychain stub and builds encryptors per recordID.
+    private final class TestKeysHandle: @unchecked Sendable {
+        let keys: ProtectionKeyClient
+        init() {
+            self.keys = ProtectionKeyClient.makeClient(store: InMemoryProtectionKeyStore())
+        }
+        func encryptor(for recordID: String) -> ValueEncryptor {
+            ValueEncryptor.live(recordID: recordID, keys: keys)
+        }
+    }
+
+    private func makeKeys() -> TestKeysHandle { TestKeysHandle() }
+
+    /// Backwards-compatible single-encryptor helper — uses a fixed
+    /// pseudo-record-id so existing tests that operate on one record
+    /// don't need per-call rewiring. New tests should call
+    /// `makeKeys().encryptor(for:)` instead.
     private func makeEncryptor() -> ValueEncryptor {
-        let store = InMemoryProtectionKeyStore()
-        let keys = ProtectionKeyClient.makeClient(store: store)
-        return ValueEncryptor(
-            encrypt: { plain in try keys.encrypt(Data(plain.utf8)) },
-            decrypt: { cipher in
-                let data = try keys.decrypt(cipher)
-                guard let s = String(data: data, encoding: .utf8) else {
-                    throw ValueEncryptor.EncryptorError.nonUTF8
-                }
-                return s
-            }
-        )
+        return makeKeys().encryptor(for: "test-encryptor-record")
     }
 
     private func withWrite(_ body: (Database) throws -> Void) throws {

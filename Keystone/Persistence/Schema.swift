@@ -2057,6 +2057,162 @@ enum Schema {
         try addColumnIfMissing(db, table: "assets", column: "is_encrypted", definition: "INTEGER NOT NULL DEFAULT 0")
     }
 
+    /// v36 — drop `records.database_id` foreign-key constraint so
+    /// individual records become valid CKShare roots. CloudKit zones
+    /// can't reference each other, so sqlite-data's `SyncEngine.share()`
+    /// rejects records whose table has any outgoing FK
+    /// (`recordNotRoot([ForeignKey])`). Removing the FK unblocks
+    /// per-record sharing for #14.
+    ///
+    /// **Cascade replacement.** The old `ON DELETE CASCADE` on this FK
+    /// is now gone — deleting a row from `databases` no longer auto-
+    /// deletes its records. App writes that delete a database must
+    /// explicitly delete the records first; see
+    /// `DBWrites.deleteDatabaseAndChildren` for the helper that
+    /// replaces this behavior.
+    ///
+    /// All record columns and rows are preserved verbatim; only the FK
+    /// is dropped. The `idx_records_db` index is recreated by name so
+    /// queries that filter by `database_id` keep their plan.
+    static func dropRecordsDatabaseIDFKV36(_ db: Database) throws {
+        // Idempotency: if the FK is already absent, no-op. Detected via
+        // PRAGMA foreign_key_list — empty list means we already
+        // rebuilt the table.
+        let fkRows = try Row.fetchAll(db, sql: "PRAGMA foreign_key_list(records)")
+        if fkRows.isEmpty { return }
+
+        try db.execute(sql: "PRAGMA foreign_keys = OFF")
+        try db.execute(sql: #"""
+            CREATE TABLE records_new (
+              id TEXT PRIMARY KEY NOT NULL,
+              database_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              subtitle TEXT,
+              glyph TEXT NOT NULL DEFAULT '',
+              tone TEXT NOT NULL DEFAULT 'graphite',
+              icon TEXT,
+              cover_asset_id TEXT,
+              template_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              archived_at TEXT,
+              deleted_at TEXT,
+              sort_index REAL NOT NULL,
+              sidecar_path TEXT
+            )
+        """#)
+        try db.execute(sql: """
+            INSERT INTO records_new
+            SELECT id, database_id, title, subtitle, glyph, tone, icon,
+                   cover_asset_id, template_id, created_at, updated_at,
+                   archived_at, deleted_at, sort_index, sidecar_path
+            FROM records
+        """)
+        try db.execute(sql: "DROP TABLE records")
+        try db.execute(sql: "ALTER TABLE records_new RENAME TO records")
+        try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_records_db ON records(database_id)")
+    }
+
+    /// v37 — drop the secondary FK from `property_values.property_id →
+    /// properties(id)` so the row is single-FK. sqlite-data's CloudKit
+    /// trigger routes single-FK rows into the same zone as their parent
+    /// (cascade-via-parent-FK); rows with multiple FKs default to the
+    /// default zone and don't follow a shared parent. Keeping the
+    /// `record_id` FK lets `property_values` follow `records` into a
+    /// share zone for #14.
+    ///
+    /// PropertyDef rows are workspace-level metadata (in
+    /// `privateTables:` for the SyncEngine) — not shareable, never move
+    /// out of the default zone. Recipients of a shared record already
+    /// have the same `properties.id` because property IDs are
+    /// deterministic (`"<dbID>.<key>"`) and seeded by migrations on every
+    /// device. The orphan risk (a property_value referencing a
+    /// since-deleted property) is handled by the existing seed-only
+    /// migrations and the read paths' JOINs which silently skip
+    /// orphaned values.
+    static func dropPropertyValuesPropertyFKV37(_ db: Database) throws {
+        let fkRows = try Row.fetchAll(db, sql: "PRAGMA foreign_key_list(property_values)")
+        // Idempotent: stop after the table is already single-FK.
+        if fkRows.count <= 1 { return }
+
+        try db.execute(sql: "PRAGMA foreign_keys = OFF")
+        try db.execute(sql: #"""
+            CREATE TABLE property_values_new (
+              id TEXT PRIMARY KEY NOT NULL,
+              record_id TEXT NOT NULL,
+              property_id TEXT NOT NULL,
+              text_value TEXT,
+              number_value REAL,
+              bool_value INTEGER,
+              date_value TEXT,
+              json_value TEXT,
+              enc_value BLOB,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
+            )
+        """#)
+        try db.execute(sql: """
+            INSERT INTO property_values_new
+            SELECT id, record_id, property_id, text_value, number_value, bool_value,
+                   date_value, json_value, enc_value, created_at, updated_at
+            FROM property_values
+        """)
+        try db.execute(sql: "DROP TABLE property_values")
+        try db.execute(sql: "ALTER TABLE property_values_new RENAME TO property_values")
+        try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_property_values_record ON property_values(record_id)")
+    }
+
+    /// v38 — drop the secondary FK from `assets.workspace_id →
+    /// workspaces(id)` so the row is single-FK. Same rationale as v37:
+    /// for an attached asset to follow its record into a share zone,
+    /// `assets` must be single-FK so sqlite-data's trigger routes it
+    /// alongside its parent record. The `workspace_id` column stays
+    /// (the value is still useful for non-record-bound assets) — we
+    /// just drop the SQL-level constraint.
+    static func dropAssetsWorkspaceFKV38(_ db: Database) throws {
+        let fkRows = try Row.fetchAll(db, sql: "PRAGMA foreign_key_list(assets)")
+        if fkRows.count <= 1 { return }
+
+        try db.execute(sql: "PRAGMA foreign_keys = OFF")
+        try db.execute(sql: #"""
+            CREATE TABLE assets_new (
+              id TEXT PRIMARY KEY NOT NULL,
+              workspace_id TEXT NOT NULL,
+              record_id TEXT,
+              original_filename TEXT NOT NULL,
+              stored_filename TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              mime_type TEXT,
+              file_extension TEXT,
+              byte_size INTEGER,
+              content_hash TEXT,
+              extracted_text TEXT,
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              is_encrypted INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE SET NULL
+            )
+        """#)
+        try db.execute(sql: """
+            INSERT INTO assets_new (
+                id, workspace_id, record_id, original_filename, stored_filename,
+                relative_path, mime_type, file_extension, byte_size, content_hash,
+                extracted_text, metadata_json, is_encrypted, created_at, updated_at
+            )
+            SELECT
+                id, workspace_id, record_id, original_filename, stored_filename,
+                relative_path, mime_type, file_extension, byte_size, content_hash,
+                extracted_text, metadata_json, is_encrypted, created_at, updated_at
+            FROM assets
+        """)
+        try db.execute(sql: "DROP TABLE assets")
+        try db.execute(sql: "ALTER TABLE assets_new RENAME TO assets")
+        try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_assets_record ON assets(record_id)")
+        try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(content_hash)")
+    }
+
     /// Helper: add a column if it doesn't exist, no-op otherwise.
     /// Wraps the PRAGMA + ALTER pattern used by `addSidecarPathV33`
     /// so future encrypted-column extensions stay one-liners.

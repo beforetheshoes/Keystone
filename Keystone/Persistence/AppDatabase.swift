@@ -342,6 +342,15 @@ enum AppDatabase {
         migrator.registerMigration("v35-add-encrypted-columns") { db in
             try Schema.addEncryptedColumnsV35(db)
         }
+        migrator.registerMigration("v36-drop-records-database-id-fk") { db in
+            try Schema.dropRecordsDatabaseIDFKV36(db)
+        }
+        migrator.registerMigration("v37-drop-property-values-property-fk") { db in
+            try Schema.dropPropertyValuesPropertyFKV37(db)
+        }
+        migrator.registerMigration("v38-drop-assets-workspace-fk") { db in
+            try Schema.dropAssetsWorkspaceFKV38(db)
+        }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")
