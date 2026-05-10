@@ -100,6 +100,16 @@ struct DatabaseClient: Sendable {
     var assetsForRecord: @Sendable (_ recordID: String) throws -> [AssetRecord]
     var importAsset: @Sendable (_ fileURL: URL, _ recordID: String?, _ workspaceID: String) throws -> AssetRecord
     var deleteAsset: @Sendable (_ assetID: String) throws -> Void
+    /// Aggregate counts + total bytes across every asset in the
+    /// workspace, broken down by MIME bucket. Drives the Settings →
+    /// Attachments summary cards. Single SQL roundtrip.
+    var assetStats: @Sendable (_ workspaceID: String) throws -> AssetStats
+    /// Filename + (unencrypted-only) extracted_text search. Returns
+    /// at most `limit` rows ordered by created_at DESC. Encrypted
+    /// rows match by filename only — never by their plaintext OCR
+    /// column — so the global Settings search doesn't leak phrases
+    /// from protected records.
+    var searchAssets: @Sendable (_ workspaceID: String, _ query: String, _ filter: AssetTypeFilter, _ limit: Int) throws -> [AssetSearchHit]
 
     // Cover image
     var importCoverImage: @Sendable (_ fileURL: URL, _ recordID: String, _ workspaceID: String) throws -> AssetRecord
@@ -265,6 +275,8 @@ extension DatabaseClient: DependencyKey {
         assetsForRecord: { id in try dbRead { try AssetReads.assets($0, recordID: id) } },
         importAsset:     { url, recID, wsID in try dbWrite { try AssetImporter.attachFile($0, fileURL: url, recordID: recID, workspaceID: wsID) } },
         deleteAsset:     { id in try dbWrite { try DBWrites.deleteAsset($0, assetID: id) } },
+        assetStats:      { wsID in try dbRead { try AssetReads.stats($0, workspaceID: wsID) } },
+        searchAssets:    { wsID, q, filter, limit in try dbRead { try AssetReads.search($0, workspaceID: wsID, query: q, typeFilter: filter, limit: limit) } },
 
         importCoverImage: { url, recID, wsID in try dbWrite { try DBWrites.importCoverImage($0, fileURL: url, recordID: recID, workspaceID: wsID) } },
         setRecordCover:   { recID, assetID in try dbWrite { try DBWrites.setRecordCover($0, recordID: recID, assetID: assetID) } },

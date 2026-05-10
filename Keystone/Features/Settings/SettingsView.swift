@@ -69,6 +69,8 @@ struct SettingsView: View {
                 Text(storageFooter)
             }
 
+            AttachmentsSection()
+
             Section {
                 Toggle("Open new records in detail view", isOn: $openInDetailAfterAdd)
             } header: {

@@ -39,9 +39,23 @@ Drop several files in a single drag — they all import. Or `⌘`-select multipl
 
 You can `cd` there in Terminal at any time. Files are real files; the database row's `relative_path` column is `Assets/<stored-filename>`.
 
+## Attachments overview in Settings
+
+Open **Settings → Attachments** for a workspace-wide view of every file you've attached:
+
+- **Total files** and **Total size** across every record.
+- **By type** breakdown — images, PDFs, documents, and other — bucketed by MIME type so `.jpg` and `.heic` count together.
+- **Encrypted** — count of attachments stored as ciphertext because their record is protected.
+- **Search attachments…** — opens a sheet that searches across every database in the workspace by **filename** *and* by the **extracted text** inside PDFs and other documents (when available). A type filter (All / Images / PDFs / Documents / Other) narrows the results. Tap a result to Quick Look the file.
+
+Attachments belonging to **protected records are searched by filename only** — the extracted-text content of an encrypted attachment is never surfaced through the global Settings search, even though the column itself stays plaintext today.
+
+## When an attachment hasn't finished syncing
+
+On a fresh Mac that's still pulling the workspace down from iCloud, a record may show an attachment whose bytes haven't arrived yet. Quick Look used to fail silently in that case; now Keystone shows a **placeholder alert** explaining that the file is still downloading. Try again once iCloud has caught up — there's no retry button.
+
 ## What's not (yet) supported
 
 - Inbox folder watcher — drop a file into the workspace folder and have it auto-imported. Coming.
-- OCR / text extraction from PDFs — the `extracted_text` column exists but isn't populated.
 - Asset deduplication via the SHA hash — duplicates create new rows for now.
 - Drag *out* of Keystone (e.g., dragging a tile back to Finder).
