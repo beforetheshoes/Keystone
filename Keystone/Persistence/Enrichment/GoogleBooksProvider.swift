@@ -7,11 +7,22 @@ private let log = Logger(subsystem: "Keystone", category: "Enrichment.GoogleBook
 /// API key (lower rate limits); keys are consumed when present.
 struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
     let databaseKey = "books"
-    let triggerPropertyKey = "isbn"
+    // Marker-based trigger (migration v49). Previously `"isbn"`, which
+    // mis-classified CSV / Goodreads / sidecar imports as un-enriched
+    // and re-queried Google for every pass — burning quota and
+    // 429-flooding the log. `book_enriched_at` is written by
+    // `apply(from:)` on every resolve, so anything we've actually
+    // processed is excluded from subsequent passes by the
+    // `EnrichmentService.fetchPending` query.
+    let triggerPropertyKey = "book_enriched_at"
 
-    /// Always available — endpoint works keyless. The API key, if set,
-    /// just raises the daily quota.
-    func isAvailable() async -> Bool { true }
+    /// Endpoint works keyless (key just raises the daily quota), but
+    /// when we're inside a quota cool-down we report unavailable so
+    /// `EnrichmentService` skips the whole pass instead of marching
+    /// through every pending book and burning a 3-retry stack on each.
+    func isAvailable() async -> Bool {
+        !GoogleBooksHTTP.isQuotaCooldownActive
+    }
 
     func searchCandidates(query: String) async -> [LookupCandidate] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -76,7 +87,15 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
         do {
             response = try await GoogleBooksHTTP.fetchWithRetry(url: url)
         } catch GoogleBooksHTTP.HTTPError.status(let code) {
-            log.error("books search status \(code)")
+            // 429s are expected when daily quota is exhausted —
+            // `fetchWithRetry` trips a cool-down on the first one, so
+            // subsequent calls short-circuit silently. Log once per
+            // pass at info level, not error.
+            if code == 429 {
+                log.info("books search 429 — quota cool-down active")
+            } else {
+                log.error("books search status \(code)")
+            }
             return .unavailable(reason: "HTTP \(code)")
         } catch {
             log.error("books search \(error.localizedDescription, privacy: .public)")
@@ -98,17 +117,27 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
     }
 
     /// Build an `EnrichmentApply` from a Google Books volume entry. Returns
-    /// nil only when there's no ISBN (without it the trigger-property gate
-    /// can't close, so the next pass would re-pick the same record).
+    /// nil only when there's no `title` (without one we can't show a
+    /// meaningful preview for the ambiguous case). ISBN is preferred but
+    /// not required — Google occasionally serves records without one, and
+    /// the marker-based trigger (`book_enriched_at`) means we don't need
+    /// ISBN to close the pending-gate.
     private static func apply(from item: GBVolume) -> EnrichmentApply? {
         var updates: [String: String] = [:]
         let info = item.volumeInfo
+        guard !info.title.isEmpty else { return nil }
 
-        // Prefer ISBN_13, fall back to ISBN_10.
-        let isbn = info.industryIdentifiers?.first(where: { $0.type == "ISBN_13" })?.identifier
-            ?? info.industryIdentifiers?.first(where: { $0.type == "ISBN_10" })?.identifier
-        guard let isbn, !isbn.isEmpty else { return nil }
-        updates["isbn"] = isbn
+        // Stamp the enrichment marker so this record won't be re-picked
+        // by `EnrichmentService.fetchPending` on the next pass — even
+        // if Google returned a record without an ISBN.
+        updates["book_enriched_at"] = AppDatabase.isoFormatter.string(from: Date())
+
+        // Prefer ISBN_13, fall back to ISBN_10. Optional — see note above.
+        if let isbn = info.industryIdentifiers?.first(where: { $0.type == "ISBN_13" })?.identifier
+            ?? info.industryIdentifiers?.first(where: { $0.type == "ISBN_10" })?.identifier,
+           !isbn.isEmpty {
+            updates["isbn"] = isbn
+        }
 
         if let publisher = info.publisher, !publisher.isEmpty {
             updates["publisher"] = publisher
@@ -161,16 +190,80 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
 /// `GoogleBooksProvider` (enrichment + lookup-creation search) and
 /// the `GoogleBooksCoverProvider` (cover-only picker) go through here
 /// so a quota event in one path doesn't blow the same call in another.
+///
+/// **Process-wide quota cool-down.** Google Books' free quota is daily,
+/// not per-burst. Once a key is exhausted every subsequent call returns
+/// 429 until the quota resets (midnight Pacific). Without a cool-down
+/// the enrichment pass loops: pending books × 3 retries each ×
+/// every refresh tick, which floods Console with `books search status
+/// 429` and burns CPU/network on requests that can't possibly succeed.
+///
+/// When a request exhausts retries with a final 429, we set a 30-minute
+/// process-wide cool-down. Subsequent calls short-circuit immediately
+/// with `HTTPError.status(429)` — same error shape callers already
+/// handle as `.unavailable`, so no provider logic changes.
 enum GoogleBooksHTTP {
     enum HTTPError: Error {
         case status(Int)
+    }
+
+    /// Quota cool-down window. 30 minutes is short enough that a
+    /// transient quota burp clears within the same session, long
+    /// enough that a truly-exhausted daily quota stops hammering the
+    /// API and the log.
+    private static let cooldownDuration: TimeInterval = 30 * 60
+
+    /// When `Date.now` is past this stamp, requests are allowed again.
+    /// Wrapped in a lock so multiple concurrent enrichment passes
+    /// observe a consistent value. `nonisolated(unsafe)` is OK because
+    /// every read/write goes through `cooldownLock`.
+    nonisolated(unsafe) private static var cooldownUntil: Date?
+    private static let cooldownLock = NSLock()
+
+    /// Public read of the cool-down state. Used by callers that want
+    /// to short-circuit *before* building a request (e.g. an enrichment
+    /// provider's `isAvailable()` so the orchestrator skips the whole
+    /// pass).
+    static var isQuotaCooldownActive: Bool { isInCooldown }
+
+    private static var isInCooldown: Bool {
+        cooldownLock.lock()
+        defer { cooldownLock.unlock() }
+        guard let until = cooldownUntil else { return false }
+        if Date() >= until {
+            cooldownUntil = nil
+            return false
+        }
+        return true
+    }
+
+    private static func enterCooldown() {
+        cooldownLock.lock()
+        defer { cooldownLock.unlock() }
+        let already = cooldownUntil.map { Date() < $0 } ?? false
+        if !already {
+            cooldownUntil = Date().addingTimeInterval(cooldownDuration)
+        }
+    }
+
+    /// Test-only escape hatch. Lets unit tests reset the cool-down so
+    /// quota-aware paths can be exercised deterministically.
+    static func _resetCooldownForTesting() {
+        cooldownLock.lock()
+        defer { cooldownLock.unlock() }
+        cooldownUntil = nil
     }
 
     /// 3 attempts with exponential backoff (200ms → 400ms → 800ms) on
     /// 429 / 503. Anything else throws immediately. The retries are
     /// per-call so a momentary quota burst (e.g. background enrichment
     /// hammering the API) doesn't make every interactive search fail.
+    /// Short-circuits with `HTTPError.status(429)` while a quota
+    /// cool-down is active — no network round-trip, no retry burn.
     static func fetchWithRetry<T: Decodable>(url: URL) async throws -> T {
+        if isInCooldown {
+            throw HTTPError.status(429)
+        }
         var delayMs: UInt64 = 200
         var lastError: Error?
         for attempt in 0..<3 {
@@ -187,6 +280,11 @@ enum GoogleBooksHTTP {
                             delayMs *= 2
                             continue
                         }
+                        // Final retry on 429/503 exhausted — trip the
+                        // process-wide cool-down so the rest of the
+                        // pass (and the next dozen ticks) skips the
+                        // network entirely.
+                        enterCooldown()
                     }
                     throw HTTPError.status(http.statusCode)
                 }
