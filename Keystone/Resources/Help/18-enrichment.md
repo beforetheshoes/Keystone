@@ -9,6 +9,7 @@ Each supported database has a **provider** that watches for records missing a "t
 | Database | Provider | Trigger property |
 |----------|----------|------------------|
 | Vendors | Apple Maps | `place_id` |
+| Restaurants | Apple Maps + website scrape | `place_id` then `web_enriched_at` |
 | Books | Google Books | `isbn` |
 | Movies | TMDB | `tmdb_id` |
 | TV Shows | TMDB | `tmdb_id` |
@@ -42,6 +43,21 @@ Keys live in the macOS Keychain (service `com.ryanleewilliams.keystone.api-keys`
 
 ### Vendors (Apple Maps)
 Phone, website, full address, compact city/state locality, category, and the durable Apple Place ID used to refresh the record later.
+
+### Restaurants (Apple Maps, then website scrape, then OpenStreetMap)
+On top of the Vendors pass, restaurants get a second pass that fetches the restaurant's own website and pulls out:
+
+- **Logo** — apple-touch-icon first, then the largest declared favicon, then the Open Graph image, falling back to `/apple-touch-icon.png` and `/favicon.ico`. Attached as the record's cover image.
+- **Hours, rating, price band** — read from the page's [schema.org JSON-LD](https://schema.org/Restaurant) block when present. Chain restaurants and most modern indie sites publish this; bare WordPress or static sites usually don't, and those fields stay blank for you to fill in by hand.
+- **Menu URL** — taken from the JSON-LD `hasMenu` field, or discovered by probing `/menu`, `/menus`, `/food` on the restaurant's domain.
+
+**OpenStreetMap fallback for hours**: when the restaurant's own site doesn't publish hours, Keystone queries the public [Overpass](https://overpass-api.de/) endpoint within ~125 m of the place's MapKit coordinate, matches by name, and reads the OSM `opening_hours` tag. Coverage varies by region — Western Europe is excellent, US is patchy, rural areas are sparse. OSM data is © OpenStreetMap contributors under the [ODbL](https://www.openstreetmap.org/copyright); the hours field doesn't surface this inline, but the data ultimately credits to OSM.
+
+The website scrape (and OSM fallback) only run once per restaurant. Use **Re-enrich…** on the detail view if the restaurant's site changes (e.g. new hours after a remodel). No third-party API key required.
+
+#### Editing hours by hand
+
+Tap the pencil next to the hours grid on a restaurant detail page to open the structured per-day editor. Each weekday has a three-way toggle (Closed / 24h / Hours) and accepts one or more time ranges, so a venue that closes between lunch and dinner can list both windows. The header presets — **Set weekdays…**, **Set weekends…**, **Set every day…** — fill matching days in one shot, and each row's **⋯** menu copies that day's hours to the weekdays, weekends, or every day. A close time earlier than its open time (e.g. 6:00 PM – 2:00 AM) is treated as wrapping past midnight; the "Open now" pill on the detail view honors the wrap.
 
 ### Books (Google Books)
 ISBN, publisher, published date, page count, author (if missing), and the cover image — downloaded and attached as the record's cover.

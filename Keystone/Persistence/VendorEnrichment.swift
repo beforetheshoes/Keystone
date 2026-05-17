@@ -183,6 +183,9 @@ enum VendorLookupService {
     /// categories return `nil` so the migration leaves `kind` alone.
     private static func mapPOICategory(_ category: MKPointOfInterestCategory?) -> String? {
         guard let category else { return nil }
+        if Self.foodAndDrinkCategories.contains(category) {
+            return "restaurant"
+        }
         switch category {
         // Auto / repair
         case .gasStation, .carRental, .evCharger:
@@ -200,6 +203,14 @@ enum VendorLookupService {
             return nil
         }
     }
+
+    /// POI categories the Restaurants view treats as "kind = restaurant".
+    /// Used both by `mapPOICategory` (so freshly-enriched MapKit hits
+    /// land with the right kind) and by `MapKitRestaurantProvider` when
+    /// it filters local-search results to dining venues.
+    static let foodAndDrinkCategories: Set<MKPointOfInterestCategory> = [
+        .restaurant, .cafe, .bakery, .brewery, .winery, .distillery, .nightlife
+    ]
 }
 
 /// Bridges `MKLocalSearchCompleter`'s delegate-based API to async/await.
