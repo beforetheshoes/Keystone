@@ -202,6 +202,20 @@ struct CoverThumbnail<Placeholder: View>: View {
             loadedFor = key
             return
         }
+        // iCloud Drive sets up files on other devices as placeholders
+        // until something asks for the bytes. On iPhone (where covers
+        // are written by macOS, never imported locally) the first read
+        // of every cover file hits a placeholder. Block the disk-read
+        // path until iCloud materializes the bytes, otherwise
+        // `CGImageSourceCreateWithURL` returns nil and the view shows
+        // its initials fallback forever. Non-ubiquity URLs return
+        // immediately.
+        guard await UbiquityFile.awaitMaterialization(url) else {
+            // Download didn't complete within the timeout — keep the
+            // placeholder up; the next `.task` cycle (next layout) can
+            // retry naturally.
+            return
+        }
         let result = await ThumbnailLoader.image(at: url, maxPixelSize: targetPixelSize)
         image = result
         loadedFor = key

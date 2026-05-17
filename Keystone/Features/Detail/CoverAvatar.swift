@@ -17,6 +17,12 @@ struct CoverAvatar: View {
     var size: CGFloat = 72
 
     @State private var hovering = false
+    /// Lazily-loaded cover. Stays nil until iCloud Drive has
+    /// materialized the underlying file (no-op for local paths). The
+    /// view shows the initials/gradient fallback in the meantime,
+    /// then swaps in the image once it's available.
+    @State private var loadedImage: Image?
+    @State private var loadedFor: URL?
     #if os(macOS)
     @State private var fileImporterOpen = false
     #else
@@ -79,26 +85,56 @@ struct CoverAvatar: View {
 
     @ViewBuilder
     private var imageOrFallback: some View {
-        if let url = record.coverImageURL, let img = LocalImage.load(url) {
-            img
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: corner, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [record.tone.base, record.tone.ink],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
-                .frame(width: size, height: size)
-                .overlay {
-                    Text(record.glyph)
-                        .font(.kstDisplay(size: max(14, size * 0.40), weight: .semibold))
-                        .foregroundStyle(.white)
-                }
+        Group {
+            if let img = loadedImage {
+                img
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [record.tone.base, record.tone.ink],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .frame(width: size, height: size)
+                    .overlay {
+                        Text(record.glyph)
+                            .font(.kstDisplay(size: max(14, size * 0.40), weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+            }
         }
+        .task(id: record.coverImageURL) {
+            await loadCoverIfNeeded()
+        }
+    }
+
+    /// Resolve the record's cover image asynchronously so iCloud Drive
+    /// placeholders can be materialized before the bytes are read. The
+    /// synchronous `LocalImage.load` path returns nil for placeholders,
+    /// which made covers stay invisible on iPhone (where every cover is
+    /// always a placeholder until it's been opened once).
+    private func loadCoverIfNeeded() async {
+        let url = record.coverImageURL
+        if loadedFor == url, loadedImage != nil { return }
+        guard let url else {
+            loadedImage = nil
+            loadedFor = nil
+            return
+        }
+        // `awaitMaterialization` is a no-op for non-iCloud paths and
+        // returns immediately when the file is already local — so this
+        // is free on macOS-imported workspaces and only does real work
+        // on the first iPhone read of each cover.
+        guard await UbiquityFile.awaitMaterialization(url) else {
+            return  // Timed out; next .task fire (re-render) retries.
+        }
+        let img = LocalImage.load(url)
+        loadedImage = img
+        loadedFor = url
     }
 
     private func presentPicker() {
