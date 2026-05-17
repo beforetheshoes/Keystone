@@ -649,7 +649,21 @@ struct AppFeature {
                             // markdown; etc.). Run a pass across every
                             // available provider so they don't have to
                             // wait until next launch.
+                            //
+                            // **macOS only.** Enrichment is memory-
+                            // heavy (MapKit batches, website HTML
+                            // parses, full property snapshots per
+                            // record) and was killing iPhone under
+                            // the combined load of CloudKit's initial
+                            // sync flood. The iPhone is a viewer /
+                            // light editor; records added there get
+                            // enriched on the next macOS launch, and
+                            // the per-record "Re-enrich" gesture
+                            // still works on iOS via
+                            // `enrichSingleRecord`.
+                            #if os(macOS)
                             await EnrichmentService.shared.enrichPending()
+                            #endif
                             // Propagate the newly-written property
                             // values into whatever view the user is
                             // currently on — without this, an inbox
@@ -677,6 +691,15 @@ struct AppFeature {
                         // this, freshly-enriched data only became
                         // visible after the user quit and re-opened
                         // the app.
+                        //
+                        // **macOS only.** Boot-time enrichment +
+                        // cover-compaction were OOM-killing the
+                        // iPhone build under CloudKit's initial sync
+                        // flood. iOS gets a quieter launch and
+                        // delegates enrichment to the per-record
+                        // "Re-enrich" gesture (`enrichSingleRecord`,
+                        // which still works on iOS).
+                        #if os(macOS)
                         try? await Task.sleep(for: .seconds(8))
                         await EnrichmentService.shared.enrichPending()
                         await send(.refreshSidebar)
@@ -693,6 +716,10 @@ struct AppFeature {
                         // bug, parser bail-out passthroughs). Also
                         // UserDefaults-gated; runs once per device.
                         RestaurantHoursCleanupPass.start()
+                        #else
+                        // Quiet the unused-parameter warning on iOS.
+                        _ = send
+                        #endif
                     },
                     .run { _ in
                         // Watch <workspace>/Cars/ for external edits
