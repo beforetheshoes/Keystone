@@ -13,6 +13,14 @@ struct PropertyValueField: View {
     /// other field kinds ignore it. Default-nil keeps existing call
     /// sites compiling unchanged.
     var recordID: String? = nil
+    /// Optional hook for the select / multiSelect editors to register
+    /// a brand-new option on the property when the user types one via
+    /// the "Add new…" affordance. When nil, the affordance is hidden.
+    var onAddOption: ((_ option: String) -> Void)? = nil
+    /// Optional hook to remove an option from the property and strip
+    /// it from every record that carries it. When nil, the per-option
+    /// delete affordance in the multiSelect popover is hidden.
+    var onDeleteOption: ((_ option: String) -> Void)? = nil
 
     var body: some View {
         switch property.type {
@@ -21,12 +29,15 @@ struct PropertyValueField: View {
         case .dateTZ:
             DateTimeZoneField(value: $value, onCommit: onCommit)
         case .address:
-            AddressAutocompleteField(
-                value: $value,
-                recordID: recordID,
-                propertyKey: property.key,
-                onCommit: onCommit
-            )
+            HStack(spacing: 6) {
+                AddressAutocompleteField(
+                    value: $value,
+                    recordID: recordID,
+                    propertyKey: property.key,
+                    onCommit: onCommit
+                )
+                DirectionsMenu(rawValue: value)
+            }
         case .phone:
             PhoneField(value: $value, onCommit: onCommit)
         case .email:
@@ -40,7 +51,15 @@ struct PropertyValueField: View {
         case .json:
             JSONField(value: $value, onCommit: onCommit)
         case .select:
-            SelectField(property: property, value: $value, onCommit: onCommit)
+            SelectField(property: property, value: $value, onCommit: onCommit, onAddOption: onAddOption)
+        case .multiSelect:
+            MultiSelectField(
+                property: property,
+                value: $value,
+                onCommit: onCommit,
+                onAddOption: onAddOption,
+                onDeleteOption: onDeleteOption
+            )
         default:
             TextField("—", text: $value)
                 .textFieldStyle(.plain)
@@ -88,6 +107,9 @@ private struct DateField: View {
         .buttonStyle(.plain)
         .popover(isPresented: $isPresentingPicker, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
+                #if os(macOS)
+                MonthYearJumpBar(date: $date)
+                #endif
                 DatePicker(
                     "Date",
                     selection: $date,
@@ -122,6 +144,68 @@ private struct DateField: View {
         }
     }
 }
+
+#if os(macOS)
+/// Month + Year jump menus shown above a `.graphical` DatePicker on
+/// macOS. The system header on that style is read-only on macOS, which
+/// makes navigating to far-past years (birthdates) require dozens of
+/// arrow clicks. This bar lets the user jump in one selection. iOS
+/// already exposes a tappable year/month header on the graphical style,
+/// so this is macOS-only.
+private struct MonthYearJumpBar: View {
+    @Binding var date: Date
+
+    private static let yearRange: [Int] = {
+        let now = Calendar.current.component(.year, from: Date())
+        return Array(((now - 120)...(now + 10)).reversed())
+    }()
+    private static let monthSymbols = Calendar.current.standaloneMonthSymbols
+
+    var body: some View {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        let monthBinding = Binding<Int>(
+            get: { comps.month ?? 1 },
+            set: { apply(year: comps.year ?? 1970, month: $0, day: comps.day ?? 1) }
+        )
+        let yearBinding = Binding<Int>(
+            get: { comps.year ?? 1970 },
+            set: { apply(year: $0, month: comps.month ?? 1, day: comps.day ?? 1) }
+        )
+        HStack(spacing: 8) {
+            Picker("Month", selection: monthBinding) {
+                ForEach(Array(Self.monthSymbols.enumerated()), id: \.offset) { idx, name in
+                    Text(name).tag(idx + 1)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(minWidth: 110)
+
+            Picker("Year", selection: yearBinding) {
+                ForEach(Self.yearRange, id: \.self) { y in
+                    Text(verbatim: String(y)).tag(y)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(minWidth: 84)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func apply(year: Int, month: Int, day: Int) {
+        let cal = Calendar.current
+        var probe = DateComponents(year: year, month: month, day: 1)
+        guard let firstOfMonth = cal.date(from: probe),
+              let range = cal.range(of: .day, in: .month, for: firstOfMonth)
+        else { return }
+        probe.day = min(max(day, 1), range.upperBound - 1)
+        if let newDate = cal.date(from: probe) { date = newDate }
+    }
+}
+#endif
 
 // MARK: - Date range
 
@@ -258,21 +342,42 @@ private struct PhoneField: View {
     var onCommit: () -> Void
 
     var body: some View {
-        TextField("—", text: Binding(
-            get: { value },
-            set: { newValue in
-                value = PhoneValueCodec.format(newValue)
+        HStack(spacing: 6) {
+            TextField("—", text: Binding(
+                get: { value },
+                set: { newValue in
+                    value = PhoneValueCodec.format(newValue)
+                }
+            ))
+            .textFieldStyle(.plain)
+            .font(.kstMono(size: 13))
+            .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+            #if os(iOS)
+            .keyboardType(.phonePad)
+            .textContentType(.telephoneNumber)
+            #endif
+            .onSubmit(onCommit)
+            .onChange(of: value) { _, _ in onCommit() }
+
+            if let url = PhoneValueCodec.telURL(value) {
+                ConfirmedURLAction(
+                    url: url,
+                    prompt: "Call \(value)?",
+                    detail: nil,
+                    primaryLabel: "Call"
+                ) {
+                    Image(systemName: "phone.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(KstColor.ink2)
+                        .frame(width: 22, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: KstRadius.r1, style: .continuous)
+                                .fill(KstColor.paper1)
+                        )
+                }
+                .help("Call \(value)")
             }
-        ))
-        .textFieldStyle(.plain)
-        .font(.kstMono(size: 13))
-        .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
-        #if os(iOS)
-        .keyboardType(.phonePad)
-        .textContentType(.telephoneNumber)
-        #endif
-        .onSubmit(onCommit)
-        .onChange(of: value) { _, _ in onCommit() }
+        }
     }
 }
 
@@ -306,6 +411,31 @@ enum PhoneValueCodec {
         default:
             return raw
         }
+    }
+
+    /// Strip the US "+1 " country-code prefix when present. The
+    /// stored value still carries the country code (so the detail
+    /// view's `tel:` link dials correctly internationally), but
+    /// table-cell display is tighter and more scannable without it
+    /// when every row is a domestic number.
+    static func displayUS(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("+1 ") {
+            return String(trimmed.dropFirst(3))
+        }
+        return trimmed
+    }
+
+    /// Build a `tel:` URL for dialing. Strips punctuation but preserves
+    /// the leading `+` for international numbers. Returns nil when
+    /// `raw` has fewer than 4 digits (likely a typo, not a real
+    /// dialable number).
+    static func telURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let plus = trimmed.hasPrefix("+") ? "+" : ""
+        let digits = trimmed.filter(\.isNumber)
+        guard digits.count >= 4 else { return nil }
+        return URL(string: "tel:\(plus)\(digits)")
     }
 }
 
@@ -353,18 +483,52 @@ private struct URLField: View {
     var onCommit: () -> Void
 
     var body: some View {
-        TextField("—", text: $value)
-            .textFieldStyle(.plain)
-            .font(.kstText(size: 13))
-            .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
-            #if os(iOS)
-            .keyboardType(.URL)
-            .textContentType(.URL)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            #endif
-            .onSubmit(onCommit)
-            .onChange(of: value) { _, _ in onCommit() }
+        HStack(spacing: 6) {
+            TextField("—", text: $value)
+                .textFieldStyle(.plain)
+                .font(.kstText(size: 13))
+                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+                #if os(iOS)
+                .keyboardType(.URL)
+                .textContentType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                #endif
+                .onSubmit(onCommit)
+                .onChange(of: value) { _, _ in onCommit() }
+
+            if let url = URLValueCodec.normalize(value) {
+                ConfirmedURLAction(
+                    url: url,
+                    prompt: "Open this link?",
+                    detail: url.absoluteString,
+                    primaryLabel: "Open"
+                ) {
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(KstColor.ink2)
+                        .frame(width: 22, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: KstRadius.r1, style: .continuous)
+                                .fill(KstColor.paper1)
+                        )
+                }
+                .help("Open \(url.absoluteString)")
+            }
+        }
+    }
+}
+
+enum URLValueCodec {
+    /// Normalize a user-typed URL string into something `Link` will
+    /// actually open: missing scheme gets `https://` slapped on, raw
+    /// `mailto:` / `tel:` patterns pass through. Returns nil when the
+    /// value can't be coerced into a valid URL.
+    static func normalize(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), url.scheme != nil { return url }
+        return URL(string: "https://\(trimmed)")
     }
 }
 
@@ -497,6 +661,9 @@ private struct DateTimeZoneField: View {
     @ViewBuilder
     private var popoverContent: some View {
         VStack(alignment: .leading, spacing: 12) {
+            #if os(macOS)
+            MonthYearJumpBar(date: $date)
+            #endif
             DatePicker("Date", selection: $date, displayedComponents: [.date])
                 .datePickerStyle(.graphical)
                 .labelsHidden()
@@ -569,19 +736,31 @@ private struct DateTimeZoneField: View {
 /// Editor for `.select` properties. Two modes, decided by whether the
 /// property's config_json carries an `options` list:
 ///
-/// - **With options**: renders a soft pill. Tapping cycles forward
-///   through the list (wraps at the end). Right-click / long-press
-///   opens a Menu listing every option plus a Clear item.
+/// - **With options**: renders a soft pill that opens a Menu listing
+///   every option (with a check next to the current value) plus a
+///   "Clear" item. Tapping anywhere on the pill — including the
+///   chevron — pops the menu. Old behavior (cycle on tap) was
+///   discoverability-hostile and offered no way to clear the value
+///   from the inline UI.
 /// - **Without options**: free-form text field, identical to the
 ///   pre-#6 behavior so existing select columns keep working.
 private struct SelectField: View {
     let property: PropertyRow
     @Binding var value: String
     var onCommit: () -> Void
+    var onAddOption: ((_ option: String) -> Void)? = nil
 
     var body: some View {
+        // Always show the pill when an `onAddOption` callback is
+        // available — the "Add new…" affordance lets the user seed
+        // an option list even on a property that ships with none.
+        // Without the callback, fall back to the free-form text
+        // editor for option-less properties so the existing
+        // experience is preserved.
         if let options = property.config.options, !options.isEmpty {
-            optionPill(options: options)
+            SelectPill(value: $value, options: options, onCommit: onCommit, onAddOption: onAddOption)
+        } else if onAddOption != nil {
+            SelectPill(value: $value, options: [], onCommit: onCommit, onAddOption: onAddOption)
         } else {
             TextField("—", text: $value)
                 .textFieldStyle(.plain)
@@ -591,39 +770,380 @@ private struct SelectField: View {
                 .onChange(of: value) { _, _ in onCommit() }
         }
     }
+}
 
-    private func optionPill(options: [String]) -> some View {
-        let labelText = value.isEmpty ? "—" : value
-        return Button {
-            value = SelectCycle.next(current: value, in: options)
-            onCommit()
-        } label: {
-            Text(labelText)
-                .font(.kstText(size: 12, weight: .medium))
-                .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
-                .padding(.horizontal, 10)
-                .frame(height: 22)
-                .background(value.isEmpty ? KstColor.paper2 : KstColor.paper2.opacity(0.8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(KstColor.ink4, lineWidth: 0.5)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
+/// Reusable select pill — same cycle-on-tap, right-click-for-menu UX
+/// used by the detail view, the gallery card overlay, and anywhere
+/// else a `select`-with-options needs to be edited inline. Extracted
+/// out of `SelectField` so the gallery card can render an identical
+/// pill on top of the cover image.
+struct SelectPill: View {
+    @Binding var value: String
+    var options: [String]
+    var onCommit: () -> Void
+    /// Visual variant. `.standard` is the detail-view inline pill.
+    /// `.overlay` is the gallery-card variant — slightly larger,
+    /// opaque background so it reads against a busy cover image.
+    var variant: Variant = .standard
+    /// When non-nil, the menu includes an "Add new…" item that opens
+    /// a small text-entry popover. Confirming the popover both
+    /// selects the new value AND registers it on the property via
+    /// this callback so future cells can pick it from their menus.
+    var onAddOption: ((_ option: String) -> Void)? = nil
+
+    enum Variant {
+        case standard, overlay
+    }
+
+    @State private var promptingNew = false
+    @State private var draftNew = ""
+
+    var body: some View {
+        Menu {
             ForEach(options, id: \.self) { option in
-                Button(option) {
+                Button {
                     value = option
+                    onCommit()
+                } label: {
+                    if value == option {
+                        Label(SelectOptionDisplay.format(option), systemImage: "checkmark")
+                    } else {
+                        Text(SelectOptionDisplay.format(option))
+                    }
+                }
+            }
+            if onAddOption != nil {
+                if !options.isEmpty { Divider() }
+                Button("Add new…") {
+                    draftNew = ""
+                    promptingNew = true
+                }
+            }
+            if !value.isEmpty {
+                Divider()
+                Button("Clear", role: .destructive) {
+                    value = ""
                     onCommit()
                 }
             }
-            Divider()
-            Button("Clear") {
-                value = ""
-                onCommit()
+        } label: {
+            HStack(spacing: 4) {
+                Text(value.isEmpty ? "—" : SelectOptionDisplay.format(value))
+                    .font(.kstText(size: variant == .overlay ? 11 : 12, weight: .medium))
+                    .foregroundStyle(value.isEmpty ? KstColor.ink3 : KstColor.ink0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(KstColor.ink3)
+            }
+            .padding(.horizontal, variant == .overlay ? 8 : 10)
+            .frame(height: variant == .overlay ? 20 : 22)
+            .background(background)
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .popover(isPresented: $promptingNew) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("New option")
+                    .font(.kstText(size: 11, weight: .semibold))
+                    .foregroundStyle(KstColor.ink2)
+                HStack(spacing: 6) {
+                    TextField("", text: $draftNew, onCommit: commitNewOption)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.kstText(size: 12))
+                        .frame(width: 160)
+                    Button("Add", action: commitNewOption)
+                        .disabled(draftNew.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .keyboardShortcut(.defaultAction)
+                    Button("Cancel") { promptingNew = false }
+                        .keyboardShortcut(.cancelAction)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private func commitNewOption() {
+        let trimmed = draftNew.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onAddOption?(trimmed)
+        value = trimmed
+        onCommit()
+        promptingNew = false
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        switch variant {
+        case .standard:
+            (value.isEmpty ? KstColor.paper2 : KstColor.paper2.opacity(0.8))
+        case .overlay:
+            // The gallery card overlay sits on top of cover art, so
+            // we render an opaque background even when the value is
+            // present — the cover image would otherwise show through
+            // the 0.8-alpha paper tone.
+            KstColor.paper0
+        }
+    }
+}
+
+// MARK: - MultiSelect
+
+/// Editor for `.multiSelect` properties — a row of removable chips
+/// followed by a `+` button that opens a popover listing known options
+/// (from the property's `config_json.options`) plus a "New tag…" field
+/// for free-form additions. The on-disk shape is the delimited string
+/// produced by `MultiSelectValue.encode`.
+private struct MultiSelectField: View {
+    let property: PropertyRow
+    @Binding var value: String
+    var onCommit: () -> Void
+    /// Optional hook to register a brand-new tag as an option on the
+    /// property. When set, the "New tag…" commit also registers the
+    /// tag so subsequent records' popovers offer it as a suggestion.
+    var onAddOption: ((_ option: String) -> Void)? = nil
+    /// Optional hook to remove an option from the property and strip
+    /// it off every record. When nil, the per-option delete button
+    /// is hidden. Confirmation prompt is the caller's responsibility.
+    var onDeleteOption: ((_ option: String) -> Void)? = nil
+
+    @State private var popoverOpen = false
+    @State private var draftTag = ""
+    @State private var hoveringOption: String? = nil
+    @State private var pendingDelete: String? = nil
+
+    private var tags: [String] {
+        MultiSelectValue.decode(value)
+    }
+
+    private var knownOptions: [String] {
+        // Configured options union the values already in use on this
+        // record so the user can re-pick a previously-typed tag.
+        let configured = property.config.options ?? []
+        let inUse = tags
+        var seen = Set<String>()
+        return (configured + inUse).filter { seen.insert($0.lowercased()).inserted }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(tags, id: \.self) { tag in
+                MultiSelectChip(tag: tag) {
+                    var next = tags
+                    next.removeAll { $0.caseInsensitiveCompare(tag) == .orderedSame }
+                    value = MultiSelectValue.encode(next)
+                    onCommit()
+                }
+            }
+            Button {
+                popoverOpen.toggle()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(KstColor.ink2)
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .background(KstColor.paper1)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $popoverOpen, arrowEdge: .bottom) {
+                popoverBody
+                    .padding(12)
+                    .frame(minWidth: 220, idealWidth: 240)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Search-as-you-type: when the user types into the tag field,
+    /// the option list shrinks to entries matching the query. An
+    /// existing-tag match is preferred over creating a duplicate.
+    private var filteredOptions: [String] {
+        let q = draftTag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return knownOptions }
+        return knownOptions.filter { $0.lowercased().contains(q) }
+    }
+
+    private var draftMatchesExistingOption: Bool {
+        let q = draftTag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return false }
+        return knownOptions.contains { $0.lowercased() == q }
+    }
+
+    private var trimmedDraft: String {
+        draftTag.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var popoverBody: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Search or add tag…", text: $draftTag, onCommit: commitDraftOrToggleExact)
+                .textFieldStyle(.roundedBorder)
+                .font(.kstText(size: 12))
+            if !filteredOptions.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(filteredOptions, id: \.self) { option in
+                            optionRow(option)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+            if !trimmedDraft.isEmpty, !draftMatchesExistingOption {
+                if !filteredOptions.isEmpty { Divider() }
+                Button(action: commitDraft) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Add \"\(trimmedDraft)\"")
+                            .font(.kstText(size: 13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(KstColor.ceruleanInk)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
+        .confirmationDialog(
+            "Delete tag \"\(pendingDelete ?? "")\"?",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDelete
+        ) { option in
+            Button("Delete", role: .destructive) {
+                onDeleteOption?(option)
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text("Removes the tag from this and every other record that has it.")
+        }
+    }
+
+    @ViewBuilder
+    private func optionRow(_ option: String) -> some View {
+        let isOn = tags.contains { $0.caseInsensitiveCompare(option) == .orderedSame }
+        let isHovering = hoveringOption == option
+        HStack(spacing: 6) {
+            Button {
+                toggle(option)
+                // Clear the search so the next pick works against
+                // the full list.
+                draftTag = ""
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isOn ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 13))
+                        .foregroundStyle(isOn ? KstColor.ink0 : KstColor.ink3)
+                    Text(option)
+                        .font(.kstText(size: 13))
+                        .foregroundStyle(KstColor.ink0)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if onDeleteOption != nil {
+                Button {
+                    pendingDelete = option
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(KstColor.ink3)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("Delete this tag everywhere")
+                .opacity(isHovering ? 1 : 0)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hoveringOption = $0 ? option : (hoveringOption == option ? nil : hoveringOption) }
+    }
+
+    private func toggle(_ option: String) {
+        var next = tags
+        if let idx = next.firstIndex(where: { $0.caseInsensitiveCompare(option) == .orderedSame }) {
+            next.remove(at: idx)
+        } else {
+            next.append(option)
+        }
+        value = MultiSelectValue.encode(next)
+        onCommit()
+    }
+
+    /// Pressing Enter in the search field. If the draft exactly
+    /// matches a known option (case-insensitive), toggle it. Otherwise
+    /// add it as a new tag.
+    private func commitDraftOrToggleExact() {
+        let trimmed = trimmedDraft
+        guard !trimmed.isEmpty else { return }
+        if let match = knownOptions.first(where: {
+            $0.caseInsensitiveCompare(trimmed) == .orderedSame
+        }) {
+            toggle(match)
+            draftTag = ""
+        } else {
+            commitDraft()
+        }
+    }
+
+    private func commitDraft() {
+        let trimmed = trimmedDraft
+        guard !trimmed.isEmpty else { return }
+        var next = tags
+        if !next.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            next.append(trimmed)
+        }
+        value = MultiSelectValue.encode(next)
+        draftTag = ""
+        // Persist the new tag as a property option so subsequent
+        // records' popovers offer it as a suggestion. Falls through
+        // silently when no callback is wired.
+        onAddOption?(trimmed)
+        onCommit()
+    }
+}
+
+private struct MultiSelectChip: View {
+    let tag: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(tag)
+                .font(.kstText(size: 11, weight: .medium))
+                .foregroundStyle(KstColor.ink0)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(KstColor.ink3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
+        .frame(height: 20)
+        .background(KstColor.paper2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(KstColor.ink4, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 

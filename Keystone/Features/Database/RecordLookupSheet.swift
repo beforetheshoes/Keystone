@@ -16,6 +16,16 @@ struct RecordLookupSheet: View {
     @Bindable var store: StoreOf<AppFeature>
     let databaseID: String
     let databaseName: String
+    /// Provider-registry key. Defaults to `databaseID` (matches the
+    /// pre-views behavior), but a saved view can override — e.g. the
+    /// Restaurants view passes `"restaurant"` so its MapKit search is
+    /// constrained to food/drink POIs even though records still land
+    /// in the Vendors database.
+    var lookupProviderKey: String? = nil
+    /// Kind value to stamp onto records created via the "Create blank"
+    /// escape hatch. The lookup-picked path doesn't need this (the
+    /// provider's apply payload carries kind itself).
+    var presetKind: String? = nil
     /// When non-nil, the sheet is in "re-enrich" mode: picking a
     /// candidate updates this existing record rather than creating a
     /// new one.
@@ -185,8 +195,9 @@ struct RecordLookupSheet: View {
     }
 
     private func createBlank() {
+        let presets: [String: String] = presetKind.map { ["kind": $0] } ?? [:]
         store.send(.closeLookup)
-        store.send(.createBlankRecord(databaseID: databaseID))
+        store.send(.createBlankRecord(databaseID: databaseID, presets: presets))
     }
 
     private func runSearch(force: Bool = false) async {
@@ -202,7 +213,8 @@ struct RecordLookupSheet: View {
         try? await Task.sleep(nanoseconds: 250_000_000)
         if Task.isCancelled { return }
 
-        guard let provider = LookupRegistry.provider(for: databaseID) else { return }
+        let key = lookupProviderKey ?? databaseID
+        guard let provider = LookupRegistry.provider(for: key) else { return }
 
         await MainActor.run { loading = true }
         let results = await provider.searchCandidates(query: trimmed)

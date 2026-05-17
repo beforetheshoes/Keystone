@@ -1,6 +1,35 @@
 import SwiftUI
+import ComposableArchitecture
 
+/// Dispatcher: Books / Movies / TV Shows get the full statistics
+/// experience (`StatsDetailView`); every other database falls through
+/// to the original generic-dashboard body (still rendered by
+/// `GenericDashboard`). There used to be a separate "summary card"
+/// per database with a "Show more stats →" button that pushed a
+/// dedicated stats page, but the user is already on a stats tab —
+/// the two-tier design was redundant chrome. Now the dashboard tab
+/// is the stats experience.
 struct DashboardView: View {
+    @Bindable var store: StoreOf<AppFeature>
+    var db: DBRow
+    var properties: [PropertyRow]
+    var records: [RecordRow]
+
+    var body: some View {
+        switch db.id {
+        case "books", "movies", "tv_shows":
+            StatsDetailView(store: store, db: db, properties: properties, records: records)
+        default:
+            GenericDashboard(db: db, properties: properties, records: records)
+        }
+    }
+}
+
+/// Pre-stats dashboard body, kept as the fallback for every database
+/// that doesn't have a custom stats summary yet (people, pets,
+/// vehicles, …). Renders a single bar-chart card grouped by the
+/// first `.select` property plus a "RECENT" list.
+struct GenericDashboard: View {
     var db: DBRow
     var properties: [PropertyRow]
     var records: [RecordRow]

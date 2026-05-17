@@ -34,7 +34,7 @@ struct FilterBar: View {
                     Button {
                         store.send(.addFilter(propertyKey: p.key))
                     } label: {
-                        Label(p.name, systemImage: filterIconName(for: p.type))
+                        Label(FilterBar.menuLabel(for: p), systemImage: FilterBar.menuIconName(for: p))
                     }
                 }
                 if !store.filters.isEmpty {
@@ -76,6 +76,11 @@ struct FilterBar: View {
     /// it. Hide types we don't have editors for yet.
     private var filterableProperties: [PropertyRow] {
         properties.filter { p in
+            // `vendors.hours` is plain-text-typed but renders as an
+            // Open Now toggle via the predicate factory, so include
+            // it even though we'd normally skip a text column with no
+            // typed editor.
+            if p.key == "hours" { return true }
             switch p.type {
             case .title, .text, .relation, .date, .dateRange, .dateTZ, .address,
                  .select, .multiSelect, .status, .number, .currency,
@@ -89,6 +94,26 @@ struct FilterBar: View {
 
     private func filterIconName(for type: PropertyType) -> String {
         switch type {
+        case .relation:                          return "link"
+        case .date, .dateRange, .dateTZ:         return "calendar"
+        case .select, .multiSelect, .status:     return "circle.dashed"
+        case .number, .currency:                 return "number"
+        case .checkbox:                          return "checkmark.square"
+        case .title, .text:                      return "textformat"
+        default:                                  return "magnifyingglass"
+        }
+    }
+
+    /// Display label for the chip menu entry — usually the property's
+    /// own name. The Hours column shows as "Open now" so the menu
+    /// matches the predicate it spawns.
+    fileprivate static func menuLabel(for property: PropertyRow) -> String {
+        property.key == "hours" ? "Open now" : property.name
+    }
+
+    fileprivate static func menuIconName(for property: PropertyRow) -> String {
+        if property.key == "hours" { return "clock" }
+        switch property.type {
         case .relation:                          return "link"
         case .date, .dateRange, .dateTZ:         return "calendar"
         case .select, .multiSelect, .status:     return "circle.dashed"
@@ -147,7 +172,7 @@ private struct FilterChip: View {
                 HStack(spacing: 4) {
                     Image(systemName: chipIcon)
                         .font(.system(size: 10, weight: .medium))
-                    Text(property.name)
+                    Text(property.key == "hours" ? "Open now" : property.name)
                         .font(.kstText(size: 12, weight: .semibold))
                     if !summary.isEmpty {
                         Text("·")
@@ -203,6 +228,7 @@ private struct FilterChip: View {
     }
 
     private var chipIcon: String {
+        if property.key == "hours" { return "clock" }
         switch property.type {
         case .relation:                       return "link"
         case .date, .dateRange, .dateTZ:      return "calendar"
@@ -231,7 +257,11 @@ private struct FilterChip: View {
             case (let a?, let b?):        return "\(f.string(from: a)) – \(f.string(from: b))"
             }
         case .selectIsAnyOf(let values):
-            return values.isEmpty ? "" : (values.count == 1 ? values[0] : "\(values.count) selected")
+            return values.isEmpty
+                ? ""
+                : (values.count == 1
+                    ? SelectOptionDisplay.format(values[0])
+                    : "\(values.count) selected")
         case .textContains(let s):
             let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? "" : "contains \"\(trimmed)\""
@@ -247,6 +277,12 @@ private struct FilterChip: View {
             case nil:    return ""
             case true:   return "yes"
             case false:  return "no"
+            }
+        case .openNow(let b):
+            switch b {
+            case nil:    return ""
+            case true:   return "yes"
+            case false:  return "closed"
             }
         }
     }
@@ -301,6 +337,8 @@ private struct FilterEditor: View {
                 NumberRangeEditor(store: store, filter: filter, low: lo, high: hi)
             case .checkbox(let b):
                 CheckboxEditor(store: store, filter: filter, value: b)
+            case .openNow(let b):
+                OpenNowEditor(store: store, filter: filter, value: b)
             }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -440,7 +478,7 @@ private struct SelectFilterEditor: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(distinctValues, id: \.self) { v in
-                        CheckboxRow(isOn: bindingForValue(v), label: v)
+                        CheckboxRow(isOn: bindingForValue(v), label: SelectOptionDisplay.format(v))
                     }
                 }
                 .padding(.trailing, 4)
@@ -540,5 +578,43 @@ private struct CheckboxEditor: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+    }
+}
+
+/// Open Now editor — three-way Any/Open/Closed against the venue's
+/// stored hours JSON. A record without a parseable hours payload
+/// never matches (see `FilterEngine.match` for the `.openNow` case),
+/// so this filter is most useful once the hours editor / MapKit
+/// autofill lands.
+private struct OpenNowEditor: View {
+    @Bindable var store: StoreOf<AppFeature>
+    let filter: Filter
+    let value: Bool?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: Binding<Int>(
+                get: {
+                    switch value { case nil: 0; case true?: 1; case false?: 2 }
+                },
+                set: { idx in
+                    let pred: FilterPredicate = switch idx {
+                    case 1:  .openNow(true)
+                    case 2:  .openNow(false)
+                    default: .openNow(nil)
+                    }
+                    store.send(.updateFilter(id: filter.id, predicate: pred))
+                }
+            )) {
+                Text("Any").tag(0)
+                Text("Open").tag(1)
+                Text("Closed").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text("Compares against the venue's stored hours in your local time.")
+                .font(.kstText(size: 11))
+                .foregroundStyle(KstColor.ink3)
+        }
     }
 }

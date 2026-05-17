@@ -3,14 +3,83 @@ import ComposableArchitecture
 
 struct DatabaseDetailView: View {
     @Bindable var store: StoreOf<AppFeature>
+    /// Header/breadcrumb-source DBRow. When the route is a saved view
+    /// (Nav.view), the caller passes a synthesized DBRow built from
+    /// the view (id = view.id, name/icon = view's). Record-level actions
+    /// have to use the *backing* database id — `effectiveDatabaseID`
+    /// resolves that uniformly via the store's currentView slot.
     var db: DBRow
 
     @State private var deleteAllConfirming: Bool = false
+
+    /// Backing database id for record reads/writes. Equals `db.id` for
+    /// the plain database route, and `currentView.databaseID` when the
+    /// active route is a saved view (so e.g. tapping a row in the
+    /// Restaurants view navigates to a record in `vendors`, not in the
+    /// non-existent `view-restaurants`).
+    private var effectiveDatabaseID: String {
+        store.currentView?.databaseID ?? db.id
+    }
+
+    /// Whether the active route is a saved view rather than a real
+    /// database. Used to hide affordances (Delete all…) that don't make
+    /// sense on a filtered presentation.
+    private var isViewRoute: Bool { store.currentView != nil }
+
+    /// True when an EnrichmentProvider is registered for the active
+    /// (backing) database. Gates the "Re-enrich all visible…" menu
+    /// item so it doesn't appear on databases that have no providers
+    /// (e.g. Trips, Maintenance) where it'd be a no-op.
+    private var hasRegisteredEnrichmentProvider: Bool {
+        let key = store.currentView?.databaseID ?? db.id
+        return EnrichmentService.registry.contains { $0.databaseKey == key }
+    }
+
+    /// Records still being enriched by an in-flight bulk pass, scoped
+    /// to the currently-visible record set. Drives the inline
+    /// "Enriching X of Y…" progress label.
+    private var bulkEnrichingCount: Int {
+        let visible = Set(store.filteredRecords.map(\.id))
+        return store.enrichingRecordIDs.intersection(visible).count
+    }
 
     /// Show the Calendar item in the view switcher only when the
     /// database has a column the calendar can plot against.
     private var hasDateProperty: Bool {
         store.currentProperties.contains { $0.type == .date || $0.type == .dateTZ }
+    }
+
+    /// Properties to show in list/table columns. In view mode, only the
+    /// view's pinned kind's columns + universal columns. In plain mode,
+    /// universal columns only (kind-scoped columns hide from the
+    /// generic table — visit the view to see them).
+    private var visibleProperties: [PropertyRow] {
+        let pinnedKind = store.currentView?.pinnedKind
+        return store.currentProperties.filter { p in
+            guard p.isVisible(forKind: pinnedKind) else { return false }
+            // When the active view pins a `kind` value (e.g. the
+            // Restaurants view pins kind=restaurant), every visible
+            // record shares that value — showing the column adds no
+            // information. The generic Vendors / plain-database
+            // routes keep the column.
+            if pinnedKind != nil, p.key == "kind" { return false }
+            return true
+        }
+    }
+
+    /// Records as they should appear in any view kind — pinned filters,
+    /// user-added filters, then the active sort. Gallery / list /
+    /// dashboard now honor all three (previously only table + calendar
+    /// did). Group bucketing happens inside each view since the bucket
+    /// list isn't shared.
+    private var displayedRecords: [RecordRow] {
+        let filtered = store.filteredRecords
+        return SortEngine.apply(
+            filtered,
+            key: store.sortKey,
+            ascending: store.sortAscending,
+            properties: visibleProperties
+        )
     }
 
     /// Count of protected records currently hidden anywhere in the
@@ -29,16 +98,81 @@ struct DatabaseDetailView: View {
                     selected: store.viewKind,
                     showsCalendar: hasDateProperty
                 ) { store.send(.setViewKind($0)) }
+                SortMenu(
+                    properties: visibleProperties,
+                    sortKey: store.sortKey,
+                    sortAscending: store.sortAscending,
+                    onSort: { store.send(.toggleSort($0)) },
+                    onSetAscending: { _ in
+                        // The reducer's `toggleSort` toggles direction
+                        // when re-clicking the same key — so calling
+                        // it again on the current key flips ascending.
+                        if let key = store.sortKey {
+                            store.send(.toggleSort(key))
+                        }
+                    },
+                    onClear: {
+                        if let key = store.sortKey {
+                            // toggleSort cycles asc → desc → nil for a
+                            // single key. Send one toggle when already
+                            // descending, two when ascending.
+                            if store.sortAscending {
+                                store.send(.toggleSort(key))
+                            }
+                            store.send(.toggleSort(key))
+                        }
+                    }
+                )
+                GroupMenu(
+                    properties: visibleProperties,
+                    groupKey: store.groupKey,
+                    setGroupKey: { store.send(.setGroupKey($0)) }
+                )
+                // Column visibility picker — only meaningful in the
+                // table view (other views select their own subset of
+                // properties to render). Skip it on gallery/list/etc.
+                if store.viewKind == .table {
+                    ColumnsMenu(
+                        properties: visibleProperties,
+                        hidden: store.hiddenColumns,
+                        toggle: { key, hidden in
+                            store.send(.setColumnHidden(key: key, hidden: hidden))
+                        }
+                    )
+                }
+                if store.viewKind == .gallery {
+                    GallerySizeControl(
+                        size: store.galleryCoverSize,
+                        onChange: { store.send(.setGalleryCoverSize($0)) }
+                    )
+                }
                 KstButton(style: .primary, action: {
                     store.send(.openLookup(databaseID: db.id, databaseName: db.name))
                 }) {
                     Text("+ New")
                 }
                 Menu {
+                    // Bulk Re-enrich — only meaningful when the
+                    // active database (or view's backing database)
+                    // actually has an EnrichmentProvider registered.
+                    if hasRegisteredEnrichmentProvider {
+                        Button("Re-enrich all visible…") {
+                            store.send(.reenrichAllVisibleRecords)
+                        }
+                        .disabled(store.filteredRecords.isEmpty)
+                        Divider()
+                    }
                     Button("Delete all records…", role: .destructive) {
                         deleteAllConfirming = true
                     }
-                    .disabled(store.currentRecords.isEmpty)
+                    // Hide bulk delete on the view route — the action
+                    // would have to delete every backing-database
+                    // record (e.g. every Vendor), not just the ones
+                    // currently visible through the view's filter.
+                    // Until we model that explicitly, the only "delete
+                    // all" affordance lives on the underlying database
+                    // page.
+                    .disabled(store.currentRecords.isEmpty || isViewRoute)
                 } label: {
                     Text("⋯")
                 }
@@ -62,16 +196,26 @@ struct DatabaseDetailView: View {
                     .font(.kstDisplay(size: 26, weight: .semibold))
                     .foregroundStyle(KstColor.ink0)
                     .kerning(-0.4)
-                if (store.viewKind == .table || store.viewKind == .calendar) && !store.filters.isEmpty {
-                    Text("\(store.filteredRecords.count) of \(store.currentRecords.count)")
+                if !store.filters.isEmpty {
+                    Text("\(displayedRecords.count) of \(store.currentRecords.count)")
                         .font(.kstText(size: 13))
                         .monospacedDigit()
                         .foregroundStyle(KstColor.ink2)
                 } else {
-                    Text("\(store.currentRecords.count)")
+                    Text("\(displayedRecords.count)")
                         .font(.kstText(size: 13))
                         .monospacedDigit()
                         .foregroundStyle(KstColor.ink2)
+                }
+                if bulkEnrichingCount > 0 {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Enriching \(bulkEnrichingCount) of \(displayedRecords.count)…")
+                            .font(.kstText(size: 12, weight: .medium))
+                            .foregroundStyle(KstColor.ink2)
+                            .monospacedDigit()
+                    }
                 }
                 Spacer()
             }
@@ -81,41 +225,64 @@ struct DatabaseDetailView: View {
             .background(KstColor.paper0)
             .overlay(alignment: .bottom) { KstHairline() }
 
-            // Filter bar appears for table and calendar views — both read
-            // `filteredRecords` so a relation filter ("Trip = Tokyo 2026")
-            // narrows what's plotted on the calendar. Gallery / list /
-            // dashboard render `currentRecords` and would need separate
-            // wiring to honor filters.
-            if store.viewKind == .table || store.viewKind == .calendar {
-                FilterBar(
-                    store: store,
-                    properties: store.currentProperties,
-                    unfilteredRecords: store.currentRecords
-                )
-            }
+            // Filter bar applies in every view kind — gallery, list,
+            // and dashboard render `displayedRecords` (filtered + sorted)
+            // so user-added filter chips narrow them just like in table.
+            FilterBar(
+                store: store,
+                properties: visibleProperties,
+                unfilteredRecords: store.currentRecords
+            )
 
             switch store.viewKind {
             case .table:    TableView(
                 db: db,
-                properties: store.currentProperties,
-                records: store.filteredRecords,
+                // Table-only: drop user-hidden columns before render.
+                // Other view kinds (gallery, list, dashboard) have
+                // their own intrinsic property selection rules and
+                // ignore the hidden set on purpose.
+                properties: visibleProperties.filter { !store.hiddenColumns.contains($0.key) },
+                records: displayedRecords,
+                groups: GroupEngine.group(displayedRecords, key: store.groupKey, properties: visibleProperties),
                 sortKey: store.sortKey,
                 sortAscending: store.sortAscending,
-                onOpen: { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) },
+                onOpen: { rec in store.send(.setNav(.record(databaseID: effectiveDatabaseID, recordID: rec.id))) },
                 onSort: { store.send(.toggleSort($0)) },
                 onOpenRelation: { targetDB, targetID in store.send(.setNav(.record(databaseID: targetDB, recordID: targetID))) },
                 onSetAlignment: { propertyID, alignment in
                     store.send(.setColumnAlignment(propertyID: propertyID, alignment: alignment))
+                },
+                onUpdateValue: { recordID, key, value in
+                    store.send(.updatePropertyValue(recordID: recordID, key: key, value: value))
+                },
+                onAddPropertyOption: { propertyID, option in
+                    store.send(.addPropertyOption(propertyID: propertyID, option: option))
+                },
+                onRemovePropertyOption: { propertyID, option in
+                    store.send(.removePropertyOption(propertyID: propertyID, option: option))
                 }
             )
-            case .gallery:  GalleryView(db: db, properties: store.currentProperties, records: store.currentRecords, onOpen: { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }, store: store)
-            case .list:     ListView(db: db, properties: store.currentProperties, records: store.currentRecords) { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
-            case .dashboard: DashboardView(db: db, properties: store.currentProperties, records: store.currentRecords)
+            case .gallery:  GalleryView(
+                db: db,
+                properties: visibleProperties,
+                records: displayedRecords,
+                groups: GroupEngine.group(displayedRecords, key: store.groupKey, properties: visibleProperties),
+                coverSize: store.galleryCoverSize,
+                onOpen: { rec in store.send(.setNav(.record(databaseID: effectiveDatabaseID, recordID: rec.id))) },
+                store: store
+            )
+            case .list:     ListView(
+                db: db,
+                properties: visibleProperties,
+                records: displayedRecords,
+                groups: GroupEngine.group(displayedRecords, key: store.groupKey, properties: visibleProperties)
+            ) { rec in store.send(.setNav(.record(databaseID: effectiveDatabaseID, recordID: rec.id))) }
+            case .dashboard: DashboardView(store: store, db: db, properties: visibleProperties, records: displayedRecords)
             case .calendar: CalendarView(
                 db: db,
-                properties: store.currentProperties,
-                records: store.filteredRecords,
-                onOpen: { rec in store.send(.setNav(.record(databaseID: db.id, recordID: rec.id))) }
+                properties: visibleProperties,
+                records: displayedRecords,
+                onOpen: { rec in store.send(.setNav(.record(databaseID: effectiveDatabaseID, recordID: rec.id))) }
             )
             default:
                 Text("View not available")

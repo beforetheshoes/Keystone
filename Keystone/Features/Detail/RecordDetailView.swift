@@ -12,15 +12,67 @@ struct RecordDetailView: View {
     @State private var dirtyKeys: Set<String> = []
     @State private var lookupSheetOpen: Bool = false
 
+    /// Property keys folded into the top-of-page progress block. Hidden
+    /// from the standard PropertiesGrid below so the same field isn't
+    /// editable in two places. Empty for databases without a custom
+    /// progress block.
+    private var progressFieldKeys: Set<String> {
+        switch db.id {
+        case "books":
+            return ["progress_mode", "current_page", "progress_percent", "readable_pages"]
+        case "tv_shows":
+            return ["current_season", "current_episode"]
+        default:
+            return []
+        }
+    }
+
+    private var visibleGridProperties: [PropertyRow] {
+        let suppressed = progressFieldKeys
+        return store.currentProperties.filter {
+            // `notes` always has a richer counterpart in the block
+            // editor section below the property grid, so the
+            // property-typed `notes` field would be a duplicate
+            // input for the same kind of free-form text. Hide it
+            // from the grid; the column still appears in table /
+            // list views for at-a-glance scanning.
+            $0.key != "notes" && !suppressed.contains($0.key)
+        }
+    }
+
+    /// When the record was opened from a saved view (e.g. Restaurants
+    /// over Vendors), use the view's name + back-route for the
+    /// breadcrumb so the user feels like they're inside that view's
+    /// area, not the backing database. Falls back to the database
+    /// itself for plain-database routes.
+    private var parentCrumbLabel: String {
+        store.currentView?.name ?? db.name
+    }
+    private var parentNavAction: AppFeature.Action {
+        if let view = store.currentView {
+            return .setNav(.view(view.id))
+        }
+        return .setNav(.database(db.id))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             KstToolbar(crumbs: [
-                .init(label: db.name, action: { store.send(.setNav(.database(db.id))) }),
+                .init(label: parentCrumbLabel, action: { store.send(parentNavAction) }),
                 .init(label: record.title, action: nil),
             ]) {
-                KstButton(style: .ghost, action: { store.send(.setNav(.database(db.id))) }) {
+                KstButton(style: .ghost, action: { store.send(parentNavAction) }) {
                     Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
                     Text("Back")
+                }
+                if store.enrichingRecordIDs.contains(record.id) {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Enriching…")
+                            .font(.kstText(size: 12, weight: .medium))
+                            .foregroundStyle(KstColor.ink2)
+                    }
                 }
                 Menu {
                     if db.id == "vendors" {
@@ -28,6 +80,15 @@ struct RecordDetailView: View {
                             lookupSheetOpen = true
                         }
                         Divider()
+                    }
+                    if !CoverProviderRegistry.providers(for: db.id).isEmpty {
+                        Button("Search covers…") {
+                            store.send(.openCoverPicker(
+                                databaseID: db.id,
+                                recordID: record.id,
+                                currentTitle: record.title
+                            ))
+                        }
                     }
                     if LookupRegistry.provider(for: db.id) != nil {
                         Button("Re-enrich…") {
@@ -87,10 +148,24 @@ struct RecordDetailView: View {
                     HeroBlock(store: store, record: record, db: db, titleDraft: $titleDraft, onCommit: { commitTitle() })
                         .padding(.bottom, 28)
 
+                    // Reading / watch progress: a richer block than
+                    // the per-field PropertyValueField rendering. The
+                    // underlying property keys are still in the grid
+                    // below; suppressing them keeps the page compact.
+                    if db.id == "books" {
+                        BookProgressField(store: store, record: record)
+                            .padding(.horizontal, 0)
+                            .padding(.bottom, 16)
+                    } else if db.id == "tv_shows" {
+                        TVProgressField(store: store, record: record)
+                            .padding(.horizontal, 0)
+                            .padding(.bottom, 16)
+                    }
+
                     // Properties grid
                     PropertiesGrid(
                         store: store,
-                        properties: store.currentProperties,
+                        properties: visibleGridProperties,
                         record: record,
                         drafts: $valueDrafts,
                         onChange: { key in commitProperty(key) },
@@ -476,7 +551,18 @@ private struct PropertiesGrid: View {
     }
 
     private var rowPlan: [RowItem] {
-        let visible = properties.filter { $0.type != .title }
+        // Kind-scoped properties (e.g. `vendors.cuisine`, marked with
+        // `applicable_kinds: ["restaurant"]`) only appear in the detail
+        // view when the record's `kind` value matches. Non-restaurant
+        // vendors get a clean detail page without restaurant-specific
+        // fields cluttering the layout.
+        let recordKind: String? = {
+            let raw = record.values["kind"] ?? ""
+            return raw.isEmpty ? nil : raw
+        }()
+        let visible = properties.filter {
+            $0.type != .title && $0.isVisible(forKind: recordKind)
+        }
         var plan: [RowItem] = []
         var consumed: Set<String> = []
         for p in visible {
@@ -527,6 +613,17 @@ private struct PropertiesGrid: View {
         .clipShape(RoundedRectangle(cornerRadius: KstRadius.r3, style: .continuous))
     }
 
+    /// `vendors.hours` on a record whose `kind` is `"restaurant"`. The
+    /// detail view swaps in `RestaurantHoursValueCell` for these so the
+    /// hours render as a per-day grid instead of a dense compact string.
+    private func isRestaurantHours(_ p: PropertyRow) -> Bool {
+        guard p.key == "hours" else { return false }
+        let kind = record.values["kind"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return kind == "restaurant"
+    }
+
     @ViewBuilder
     private func singleRow(_ p: PropertyRow) -> some View {
         VStack(spacing: 0) {
@@ -541,6 +638,21 @@ private struct PropertiesGrid: View {
 
                 if p.type == .relation {
                     RelationField(store: store, property: p)
+                } else if isRestaurantHours(p) {
+                    // Render the parsed weekly schedule in place of
+                    // the dense compact-string display. Editing still
+                    // falls through to the plain text field via the
+                    // "Edit" affordance inside the view.
+                    RestaurantHoursValueCell(
+                        rawValue: drafts[p.key] ?? record.values[p.key] ?? "",
+                        editingDraft: Binding(
+                            get: { drafts[p.key] ?? record.values[p.key] ?? "" },
+                            set: { drafts[p.key] = $0 }
+                        ),
+                        property: p,
+                        recordID: record.id,
+                        onCommit: { onSubmit(p.key) }
+                    )
                 } else {
                     PropertyValueField(
                         property: p,
@@ -551,7 +663,13 @@ private struct PropertiesGrid: View {
                             }
                         ),
                         onCommit: { onSubmit(p.key) },
-                        recordID: record.id
+                        recordID: record.id,
+                        onAddOption: { option in
+                            store.send(.addPropertyOption(propertyID: p.id, option: option))
+                        },
+                        onDeleteOption: { option in
+                            store.send(.removePropertyOption(propertyID: p.id, option: option))
+                        }
                     )
                 }
 

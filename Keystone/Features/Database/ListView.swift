@@ -4,16 +4,33 @@ struct ListView: View {
     var db: DBRow
     var properties: [PropertyRow]
     var records: [RecordRow]
+    /// Optional pre-bucketed groups. When empty (or carries a single
+    /// ungrouped bucket), the view renders a flat list with no
+    /// section headers.
+    var groups: [RecordGroup] = []
     var onOpen: (RecordRow) -> Void
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
-                ForEach(records) { r in
-                    ListRow(properties: properties, record: r) { onOpen(r) }
-                        .overlay(alignment: .bottom) {
-                            Rectangle().fill(KstColor.paper3).frame(height: 0.5)
-                        }
+                let buckets = groups.isEmpty
+                    ? [RecordGroup(label: "", key: "", rows: records)]
+                    : groups
+                ForEach(Array(buckets.enumerated()), id: \.offset) { _, bucket in
+                    if !bucket.label.isEmpty {
+                        GroupSectionHeader(label: bucket.label, count: bucket.rows.count)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 14)
+                            .padding(.bottom, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(KstColor.paper0)
+                    }
+                    ForEach(bucket.rows) { r in
+                        ListRow(properties: properties, record: r) { onOpen(r) }
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(KstColor.paper3).frame(height: 0.5)
+                            }
+                    }
                 }
             }
         }
@@ -78,7 +95,13 @@ private struct ListRow: View {
             .prefix(2)
             .compactMap { p -> String? in
                 let v = record.values[p.key] ?? ""
-                return (v.isEmpty || v == "—") ? nil : v
+                guard !v.isEmpty, v != "—" else { return nil }
+                // Restaurant hours collapse to today only; the full
+                // week lives on the detail page.
+                if p.key == "hours", let today = RestaurantHoursSummary.todayShort(v) {
+                    return today
+                }
+                return v
             }
             .joined(separator: " · ")
     }
