@@ -30,6 +30,20 @@ struct SyncEngineClient: Sendable {
     var stop: @Sendable () -> Void
     var observeStatus: @Sendable () -> AsyncStream<AppFeature.SyncStatus> = { AsyncStream { $0.finish() } }
 
+    /// Trigger an immediate fetch of pending CloudKit changes. Thin
+    /// pass-through to `SyncEngine.fetchChanges(.init())` — pulls
+    /// anything the server hasn't yet handed us forward of the current
+    /// change-token. Note: there's no "fetch the last hour" knob;
+    /// CKSyncEngine reads by token, not by time window. Used by the
+    /// Sync Diagnostics "Force pull" button.
+    var forcePull: @Sendable () async throws -> Void
+
+    /// Trigger an immediate push of pending local changes. Thin
+    /// pass-through to `SyncEngine.sendChanges(.init())`. Useful when
+    /// a write seems stuck — e.g. the engine is idle but local
+    /// `SyncMetadata.needsSync` rows haven't drained yet.
+    var forcePush: @Sendable () async throws -> Void
+
     /// Share a `records` row. Looks up the row by ID, calls
     /// sqlite-data's `share()` (which handles CKShare creation /
     /// dedupe / metadata persistence), and — if the record is
@@ -87,6 +101,40 @@ extension SyncEngineClient: DependencyKey {
                     continuation.finish()
                 }
                 continuation.onTermination = { _ in task.cancel() }
+            }
+        },
+        forcePull: {
+            guard keystoneSyncEngineConfigured else {
+                throw SyncEngineClient.Error.notConfigured
+            }
+            @Dependency(\.defaultSyncEngine) var engine
+            SyncEventLogger.log(type: SyncEventType.forcePullInvoked)
+            do {
+                try await engine.fetchChanges(.init())
+            } catch {
+                SyncEventLogger.log(
+                    type: SyncEventType.syncFailed,
+                    errorCode: "force_pull",
+                    details: error.localizedDescription
+                )
+                throw error
+            }
+        },
+        forcePush: {
+            guard keystoneSyncEngineConfigured else {
+                throw SyncEngineClient.Error.notConfigured
+            }
+            @Dependency(\.defaultSyncEngine) var engine
+            SyncEventLogger.log(type: SyncEventType.forcePushInvoked)
+            do {
+                try await engine.sendChanges(.init())
+            } catch {
+                SyncEventLogger.log(
+                    type: SyncEventType.syncFailed,
+                    errorCode: "force_push",
+                    details: error.localizedDescription
+                )
+                throw error
             }
         },
         shareRecord: { recordID in
