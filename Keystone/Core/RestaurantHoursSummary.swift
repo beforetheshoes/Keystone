@@ -68,6 +68,61 @@ enum RestaurantHoursSummary {
         return "\(padding)\(open) – \(close)"
     }
 
+    /// Open/closed status for the *current* moment in the user's
+    /// locale, based on the same parse path as `todayShort`. Returns
+    /// one of `"Open now"`, `"Closed"`, `"Open 24 hours"`, or nil when
+    /// the raw value doesn't parse.
+    ///
+    /// Handles cross-midnight windows (yesterday's `18:00–02:00` is
+    /// still "Open now" at 01:30 today). Multi-window days (lunch +
+    /// dinner) match if `now` falls in any window.
+    static func todayStatus(_ raw: String, now: Date = Date()) -> String? {
+        var parsed = RestaurantHoursParser.parse(raw)
+        if parsed == nil, let translated = OSMOpeningHoursParser.parse(raw) {
+            parsed = RestaurantHoursParser.parse(translated)
+        }
+        guard let parsed else { return nil }
+
+        let todayIndex = currentWeekdayIndex(at: now)
+        let today = parsed[todayIndex]
+        if today.windows == ["open 24h"] { return "Open 24 hours" }
+
+        let nowMinutes = minutesSinceMidnight(at: now)
+
+        // Yesterday's cross-midnight wrap into today wins first — at
+        // 01:30 today, Friday's 18:00–02:00 is still keeping us open.
+        let yesterday = parsed[(todayIndex + 6) % 7]
+        for label in yesterday.windows {
+            guard let window = parseWindowMinutes(label),
+                  window.close < window.open else { continue }
+            if nowMinutes < window.close { return "Open now" }
+        }
+
+        for label in today.windows {
+            guard let window = parseWindowMinutes(label) else { continue }
+            if window.close < window.open {
+                // Today's wrap window — open from `open` through midnight.
+                if nowMinutes >= window.open { return "Open now" }
+            } else if nowMinutes >= window.open && nowMinutes < window.close {
+                return "Open now"
+            }
+        }
+        return "Closed"
+    }
+
+    private static func minutesSinceMidnight(at date: Date) -> Int {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+    }
+
+    private static func parseWindowMinutes(_ label: String) -> (open: Int, close: Int)? {
+        let parts = label.split(whereSeparator: { $0 == "–" || $0 == "-" })
+        guard parts.count == 2,
+              let open = parseClock(String(parts[0])),
+              let close = parseClock(String(parts[1])) else { return nil }
+        return (open, close)
+    }
+
     // MARK: - Internals
 
     /// Convert Calendar's 1=Sunday … 7=Saturday to Mon=0 … Sun=6 so

@@ -174,6 +174,23 @@ struct iPhoneDatabaseListView: View {
     }
 
     private func recordSubtitle(_ rec: RecordRow) -> String? {
+        // Restaurants get the status + today's hours instead of the
+        // generic kind/address pair — both are noisy on a list that's
+        // already scoped to restaurants ("kind" is always "restaurant",
+        // the full address eats two lines).
+        let kind = rec.values["kind"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if kind == "restaurant",
+           let rawHours = rec.values["hours"],
+           !rawHours.isEmpty {
+            let status = RestaurantHoursSummary.todayStatus(rawHours)
+            let today = RestaurantHoursSummary.todayShort(rawHours)
+            let parts = [status, today].compactMap { $0 }.filter { !$0.isEmpty }
+            if !parts.isEmpty { return parts.joined(separator: " · ") }
+            // Fall through to the generic subtitle if hours don't parse.
+        }
+
         let parts = ["relationship", "kind", "make", "model", "species", "address", "when"]
             .compactMap { key -> String? in
                 guard let v = rec.values[key], !v.isEmpty, v != "—" else { return nil }
