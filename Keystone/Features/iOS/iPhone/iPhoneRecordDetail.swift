@@ -18,6 +18,28 @@ struct iPhoneRecordDetail: View {
     @State private var drafts: [String: String] = [:]
 
     var body: some View {
+        scrollBody
+            .background(KstColor.paper0)
+            .navigationTitle(store.currentView?.name ?? dbRow?.name ?? "")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+            .task(id: recordID) {
+                // Drive the TCA store's nav so the shared store-backed
+                // sections (NOTES, FILES, TAGS, relations) all see the
+                // right record.
+                store.send(.setNav(.record(databaseID: databaseID, recordID: recordID)))
+                await loadLocal()
+            }
+            .onChange(of: store.currentRecord) { _, new in
+                if let new, new.id == recordID { record = new }
+            }
+            .onChange(of: store.currentOutgoingRelations) { _, new in outgoing = new }
+            .onChange(of: store.currentIncomingRelations) { _, new in incoming = new }
+            .onChange(of: store.currentProperties) { _, new in properties = new }
+    }
+
+    @ViewBuilder
+    private var scrollBody: some View {
         ScrollView {
             VStack(spacing: 18) {
                 hero
@@ -32,32 +54,19 @@ struct iPhoneRecordDetail: View {
             .padding(.horizontal, 18)
             .padding(.bottom, 32)
         }
-        .background(KstColor.paper0)
-        .navigationTitle(store.currentView?.name ?? dbRow?.name ?? "")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button("Delete record", role: .destructive) {
-                        store.send(.deleteCurrentRecord)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button("Delete record", role: .destructive) {
+                    store.send(.deleteCurrentRecord)
                 }
+            } label: {
+                Image(systemName: "ellipsis.circle")
             }
         }
-        .task(id: recordID) {
-            // Drive the TCA store's nav so the shared store-backed sections
-            // (NOTES, FILES, TAGS, relations) all see the right record.
-            store.send(.setNav(.record(databaseID: databaseID, recordID: recordID)))
-            await loadLocal()
-        }
-        .onChange(of: store.currentRecord) { _, new in
-            if let new, new.id == recordID { record = new }
-        }
-        .onChange(of: store.currentOutgoingRelations) { _, new in outgoing = new }
-        .onChange(of: store.currentIncomingRelations) { _, new in incoming = new }
-        .onChange(of: store.currentProperties) { _, new in properties = new }
     }
 
     // MARK: - Hero

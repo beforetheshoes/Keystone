@@ -131,6 +131,7 @@ struct CoverThumbnail<Placeholder: View>: View {
 
     @State private var image: CGImage?
     @State private var loadedFor: String?
+    @Environment(\.displayScale) private var displayScale
 
     init(
         url: URL?,
@@ -174,12 +175,13 @@ struct CoverThumbnail<Placeholder: View>: View {
 
     private var targetPixelSize: Int {
         let longest = max(displaySize.width, displaySize.height)
-        let scale: CGFloat
-        #if canImport(AppKit)
-        scale = NSScreen.main?.backingScaleFactor ?? 2.0
-        #else
-        scale = UIScreen.main.scale
-        #endif
+        // `displayScale` from the environment is the modern,
+        // non-deprecated way to read the screen's native scale —
+        // `UIScreen.main` was removed in iOS 26 and `NSScreen.main`
+        // doesn't reflect the window's actual screen reliably.
+        // Falls back to 2.0 on platforms / contexts where the env
+        // value is 0 (e.g. previews before layout).
+        let scale: CGFloat = displayScale > 0 ? displayScale : 2.0
         // 2× the display-size longest edge in pixels — matches the
         // device's native scale on Retina. Floor at 200 so a tiny
         // initial layout doesn't yield a postage-stamp thumbnail.
