@@ -65,13 +65,23 @@ struct SidebarView: View {
 
                     ForEach(store.areas) { area in
                         SidebarGroup(title: area.title) {
-                            ForEach(databasesForArea(area.id)) { db in
-                                SidebarRowView(
-                                    icon: .glyph(db.icon, db.accent),
-                                    label: db.name,
-                                    count: db.recordCount,
-                                    isActive: store.nav == .database(db.id)
-                                ) { store.send(.setNav(.database(db.id))) }
+                            ForEach(sidebarItemsForArea(area.id), id: \.id) { item in
+                                switch item {
+                                case let .database(db):
+                                    SidebarRowView(
+                                        icon: .glyph(db.icon, db.accent),
+                                        label: db.name,
+                                        count: db.recordCount,
+                                        isActive: store.nav == .database(db.id)
+                                    ) { store.send(.setNav(.database(db.id))) }
+                                case let .view(view):
+                                    SidebarRowView(
+                                        icon: .glyph(view.icon, view.accent),
+                                        label: view.name,
+                                        count: view.recordCount,
+                                        isActive: store.nav == .view(view.id)
+                                    ) { store.send(.setNav(.view(view.id))) }
+                                }
                             }
                             // The Mobility area gets a derived "what's
                             // due" report alongside its databases —
@@ -136,6 +146,39 @@ struct SidebarView: View {
 
     private func databasesForArea(_ areaID: String) -> [DBRow] {
         store.databases.filter { $0.areaID == areaID }
+    }
+
+    /// Merged + sorted sidebar items for the area: real databases and
+    /// saved views interleave by `sort_index` so the Restaurants view
+    /// can sit between Movies (8.1) and TV Shows (8.2) without the
+    /// sidebar code caring whether it's a view or a database.
+    private func sidebarItemsForArea(_ areaID: String) -> [SidebarItem] {
+        let dbItems: [SidebarItem] = store.databases
+            .filter { $0.areaID == areaID }
+            .map { .database($0) }
+        let viewItems: [SidebarItem] = store.views
+            .filter { $0.areaID == areaID }
+            .map { .view($0) }
+        return (dbItems + viewItems).sorted { $0.sortIndex < $1.sortIndex }
+    }
+}
+
+private enum SidebarItem {
+    case database(DBRow)
+    case view(ViewRow)
+
+    var id: String {
+        switch self {
+        case .database(let d): return "db:\(d.id)"
+        case .view(let v):     return "view:\(v.id)"
+        }
+    }
+
+    var sortIndex: Double {
+        switch self {
+        case .database(let d): return d.sortIndex
+        case .view(let v):     return v.sortIndex
+        }
     }
 }
 

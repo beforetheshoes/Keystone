@@ -354,6 +354,33 @@ enum AppDatabase {
         migrator.registerMigration("v39-rename-events-database") { db in
             try Schema.renameEventsDatabaseV39(db)
         }
+        migrator.registerMigration("v40-sync-events") { db in
+            try Schema.createSyncEventsV40(db)
+        }
+        migrator.registerMigration("v41-restaurants-as-vendors-view") { db in
+            try Schema.seedRestaurantsAsVendorsViewV41(db)
+        }
+        migrator.registerMigration("v42-database-view-prefs") { db in
+            try Schema.createDatabaseViewPrefsV42(db)
+        }
+        migrator.registerMigration("v43-collections-description-and-tags") { db in
+            try Schema.addCollectionsDescriptionAndTagsV43(db)
+        }
+        migrator.registerMigration("v44-collections-progress") { db in
+            try Schema.addCollectionsProgressV44(db)
+        }
+        migrator.registerMigration("v45-restaurant-website-enrichment") { db in
+            try Schema.addRestaurantWebsiteEnrichmentV45(db)
+        }
+        migrator.registerMigration("v46-hide-place-id") { db in
+            try Schema.hidePlaceIdV46(db)
+        }
+        migrator.registerMigration("v47-hidden-columns-pref") { db in
+            try Schema.addHiddenColumnsPrefV47(db)
+        }
+        migrator.registerMigration("v48-cuisine-to-tags") { db in
+            try Schema.renameCuisineToTagsV48(db)
+        }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")

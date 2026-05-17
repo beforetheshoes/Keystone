@@ -8,6 +8,11 @@ struct DatabaseClient: Sendable {
     var areas: @Sendable () throws -> [AreaRow]
     var databases: @Sendable () throws -> [DBRow]
     var database: @Sendable (_ id: String) throws -> DBRow?
+    /// Saved-views registered for sidebar display (`views.area_id` non-null).
+    /// The Restaurants entry — a filtered view over Vendors — surfaces
+    /// through this reader.
+    var views: @Sendable () throws -> [ViewRow]
+    var view: @Sendable (_ id: String) throws -> ViewRow?
     var properties: @Sendable (_ databaseID: String) throws -> [PropertyRow]
     /// `excluding` is the privacy-lock hidden set
     /// (`AppFeature.State.hiddenRecordIDs`). Pass `[]` from non-UI call
@@ -77,6 +82,17 @@ struct DatabaseClient: Sendable {
     /// Persist a column-alignment override on a property's `config_json`.
     /// Pass `nil` to clear and fall back to the type-aware default.
     var setPropertyAlignment: @Sendable (_ propertyID: String, _ alignment: PropertyAlignment?) throws -> Void
+    /// Append `option` to the property's `config.options` list.
+    /// Idempotent — duplicate / case-folded duplicate options are
+    /// silently dropped. Used by the select / multiSelect editors
+    /// when the user types a fresh value via "Add new…".
+    var addPropertyOption: @Sendable (_ propertyID: String, _ option: String) throws -> Void
+    /// Remove `option` from the property's `config.options` list AND
+    /// strip its value off every record that carries it (matching
+    /// case-insensitively). For `multiSelect` properties the tag is
+    /// removed from each record's pipe-delimited list; for `select`
+    /// the matching row's `text_value` is nulled.
+    var removePropertyOption: @Sendable (_ propertyID: String, _ option: String) throws -> Void
 
     var blocks: @Sendable (_ recordID: String) throws -> [BlockRow]
     var createBlock: @Sendable (_ recordID: String, _ after: String?, _ kind: BlockKind, _ text: AttributedString, _ checked: Bool?) throws -> BlockRow
@@ -115,6 +131,20 @@ struct DatabaseClient: Sendable {
     var importCoverImage: @Sendable (_ fileURL: URL, _ recordID: String, _ workspaceID: String) throws -> AssetRecord
     var setRecordCover: @Sendable (_ recordID: String, _ assetID: String?) throws -> Void
 
+    // Sync diagnostics — local-only `sync_events` table reads.
+    /// Most-recent-first slice of the diagnostic log. `limit` caps how
+    /// many rows are pulled; the Settings sheet currently asks for 200.
+    var recentSyncEvents: @Sendable (_ limit: Int) throws -> [SyncEventEntry]
+    /// Headline numbers for the Settings inline summary card. Single
+    /// SQL roundtrip; safe to call on `.task` and on every sheet
+    /// dismiss without rate-limiting.
+    var syncEventSummary: @Sendable (_ withinHours: Int) throws -> SyncEventLogger.Summary
+    /// Drop every row in `sync_events`. Used by the diagnostic UI's
+    /// "Clear log" affordance.
+    var clearSyncEvents: @Sendable () throws -> Void
+    /// Drop rows older than `days`. Returns the number deleted.
+    var purgeOldSyncEvents: @Sendable (_ days: Int) throws -> Int
+
     // Relations
     var outgoingRelations: @Sendable (_ recordID: String, _ excluding: Set<String>) throws -> [RelationLink]
     var outgoingRelationsForProperty: @Sendable (_ recordID: String, _ propertyID: String, _ excluding: Set<String>) throws -> [RelationLink]
@@ -122,6 +152,11 @@ struct DatabaseClient: Sendable {
     var relationTargetDatabaseID: @Sendable (_ propertyID: String) throws -> String?
     var addRelation: @Sendable (_ sourceRecordID: String, _ targetRecordID: String, _ propertyID: String?) throws -> RelationLink?
     var removeRelation: @Sendable (_ relationID: String) throws -> Void
+
+    // Per-database view ergonomics (sort / group / filters / gallery
+    // cover size). Local-only, not synced through CloudKit.
+    var loadViewPrefs: @Sendable (_ databaseID: String) throws -> DatabaseViewPrefs
+    var saveViewPrefs: @Sendable (_ databaseID: String, _ prefs: DatabaseViewPrefs) throws -> Void
 }
 
 /// Helpers that look up `@Dependency(\.defaultDatabase)` on each call so the
@@ -177,6 +212,8 @@ extension DatabaseClient: DependencyKey {
         areas:           { try dbRead { try DBReads.areas($0) } },
         databases:       { try dbRead { try DBReads.databases($0) } },
         database:        { id in try dbRead { try DBReads.database($0, id: id) } },
+        views:           { try dbRead { try DBReads.views($0) } },
+        view:            { id in try dbRead { try DBReads.view($0, id: id) } },
         properties:      { dbID in try dbRead { try DBReads.properties($0, databaseID: dbID) } },
         records:         { dbID, excluding in try dbRead { try DBReads.records($0, databaseID: dbID, excluding: excluding, encryptorProvider: provider) } },
         record:          { id in try dbRead { try DBReads.record($0, id: id, encryptor: provider(id)) } },
@@ -229,6 +266,8 @@ extension DatabaseClient: DependencyKey {
         deleteAllRecordsInDatabase: { dbID in try dbWrite { try DBWrites.deleteAllRecordsInDatabase($0, databaseID: dbID) } },
         changeRecordDatabase: { id, newDB in try dbWrite { try DBWrites.changeRecordDatabase($0, recordID: id, newDatabaseID: newDB) } },
         setPropertyAlignment: { propID, alignment in try dbWrite { try DBWrites.setPropertyAlignment($0, propertyID: propID, alignment: alignment) } },
+        addPropertyOption: { propID, option in try dbWrite { try DBWrites.addPropertyOption($0, propertyID: propID, option: option) } },
+        removePropertyOption: { propID, option in try dbWrite { try DBWrites.removePropertyOption($0, propertyID: propID, option: option) } },
         blocks:          { id in try dbRead { try BlockReads.blocks($0, recordID: id, encryptor: provider(id)) } },
         createBlock:     { rid, after, kind, text, checked in
             try dbWrite { db in
@@ -281,12 +320,20 @@ extension DatabaseClient: DependencyKey {
         importCoverImage: { url, recID, wsID in try dbWrite { try DBWrites.importCoverImage($0, fileURL: url, recordID: recID, workspaceID: wsID) } },
         setRecordCover:   { recID, assetID in try dbWrite { try DBWrites.setRecordCover($0, recordID: recID, assetID: assetID) } },
 
+        recentSyncEvents:  { limit in try SyncEventLogger.recentEvents(limit: limit) },
+        syncEventSummary:  { hours in try SyncEventLogger.summary(within: hours) },
+        clearSyncEvents:   { try SyncEventLogger.clear() },
+        purgeOldSyncEvents:{ days in try SyncEventLogger.purge(olderThanDays: days) },
+
         outgoingRelations:            { id, excluding in try dbRead { try RelationReads.outgoing($0, recordID: id, propertyID: nil, excluding: excluding) } },
         outgoingRelationsForProperty: { id, propID, excluding in try dbRead { try RelationReads.outgoing($0, recordID: id, propertyID: propID, excluding: excluding) } },
         incomingRelations:            { id, excluding in try dbRead { try RelationReads.incoming($0, recordID: id, excluding: excluding) } },
         relationTargetDatabaseID:     { propID in try dbRead { try RelationReads.relationTargetDB($0, propertyID: propID) } },
         addRelation:                  { src, tgt, propID in try dbWrite { try DBWrites.addRelation($0, sourceRecordID: src, targetRecordID: tgt, propertyID: propID) } },
-        removeRelation:               { id in try dbWrite { try DBWrites.removeRelation($0, relationID: id) } }
+        removeRelation:               { id in try dbWrite { try DBWrites.removeRelation($0, relationID: id) } },
+
+        loadViewPrefs: { dbID in try dbRead { try DatabaseViewPrefsReads.load($0, databaseID: dbID) } },
+        saveViewPrefs: { dbID, prefs in try dbWrite { try DatabaseViewPrefsWrites.save($0, databaseID: dbID, prefs: prefs) } }
         )
     }()
 

@@ -32,6 +32,7 @@ enum HelpTopics {
         .init(id: "21-maintenance-scheduling", title: "Maintenance scheduling"),
         .init(id: "22-privacy-lock",           title: "Privacy lock"),
         .init(id: "23-sharing",                title: "Sharing"),
+        .init(id: "24-sync-diagnostics",       title: "Sync diagnostics"),
     ]
 
     static let defaultTopicID = "01-welcome"

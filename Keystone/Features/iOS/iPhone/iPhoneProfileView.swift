@@ -14,6 +14,7 @@ struct iPhoneProfileView: View {
                     header
                     youSection
                     syncCard
+                    settingsSection
                     helpSection
                     aboutSection
                 }
@@ -99,6 +100,35 @@ struct iPhoneProfileView: View {
                 return "Synced · \(f.localizedString(for: at, relativeTo: Date()))"
             }
             return "Synced"
+        }
+    }
+
+    /// Single-row card that pushes the full `SettingsView` (storage
+    /// location, attachments, sync diagnostics, behavior, privacy lock,
+    /// API keys, version) onto the Profile stack. The Profile view's
+    /// inline cards above this — display name, sync status, version —
+    /// remain as a glanceable summary; Settings is the place users go
+    /// to actually change anything.
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            iOSSectionTitle(title: "App")
+            iOSCardList {
+                iOSCardRow(
+                    leading: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 14))
+                            .foregroundStyle(KstColor.ink2)
+                            .frame(width: 26, height: 26)
+                            .background(KstColor.paper2)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    },
+                    title: "Settings",
+                    subtitle: "Storage, attachments, sync, privacy, API keys",
+                    trailing: { iOSChevron() }
+                ) {
+                    path.append(iPhoneRoute.settings)
+                }
+            }
         }
     }
 

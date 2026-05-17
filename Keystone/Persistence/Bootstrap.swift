@@ -107,6 +107,10 @@ extension DependencyValues {
             bootstrapLog.error(
                 "SyncEngine init failed — running in LOCAL-ONLY mode this session. Error: \(String(describing: error), privacy: .public)"
             )
+            SyncEventLogger.log(
+                type: SyncEventType.engineInitFailed,
+                details: String(describing: error)
+            )
             return
         }
 

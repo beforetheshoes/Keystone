@@ -97,6 +97,10 @@ struct iPhoneSearchView: View {
             if let dbID = item.dbID {
                 path.append(iPhoneRoute.database(databaseID: dbID))
             }
+        case .view:
+            if let viewID = item.dbID {
+                path.append(iPhoneRoute.view(viewID: viewID))
+            }
         case .record:
             if let dbID = item.dbID {
                 let recID = String(item.id.dropFirst("rec-".count))

@@ -75,7 +75,11 @@ enum ImportSidecarsCLI {
                     let services = stringListField(doc, "services")
 
                     // Resolve / auto-create the vehicle record.
-                    let vehicleID = try resolveOrCreateVehicle(db, title: vehicleTitle)
+                    // Side-effect-only: ensures a `vehicles` row exists
+                    // for `vehicleTitle`. The maintenance record below
+                    // links by title via the relations promoter, so we
+                    // don't need the returned ID locally.
+                    _ = try resolveOrCreateVehicle(db, title: vehicleTitle)
 
                     // Stable record id: prefer the `id:` field
                     // written into the frontmatter by `SidecarWriter`.

@@ -809,6 +809,125 @@ enum DBWrites {
         )
     }
 
+    /// Remove an option from a select / multiSelect property's
+    /// `config.options` list AND strip the value from any record that
+    /// carries it. For `select` properties, matching rows have their
+    /// `text_value` nulled. For `multiSelect`, the tag list is
+    /// decoded, the option dropped (case-insensitive), and the
+    /// remaining tags re-encoded.
+    ///
+    /// Case-folding throughout — we don't want a typo like "Italain"
+    /// vs. "Italian" to leave a near-duplicate hidden on records
+    /// after the user thought they'd cleaned it up.
+    static func removePropertyOption(
+        _ db: Database,
+        propertyID: String,
+        option: String
+    ) throws {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard let metaRow = try Row.fetchOne(
+            db,
+            sql: "SELECT type, config_json FROM properties WHERE id = ?",
+            arguments: [propertyID]
+        ) else { return }
+        let propType: String = metaRow["type"] ?? ""
+        let existingConfig: String = metaRow["config_json"] ?? "{}"
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        // 1. Remove from the property's options list.
+        var config = PropertyConfig.parse(existingConfig)
+        var options = config.options ?? []
+        let originalCount = options.count
+        options.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        if options.count != originalCount {
+            config.options = options
+            try db.execute(
+                sql: "UPDATE properties SET config_json = ?, updated_at = ? WHERE id = ?",
+                arguments: [config.encoded(), now, propertyID]
+            )
+        }
+
+        // 2. Strip the value off records that carry it.
+        switch propType {
+        case "multiSelect":
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, text_value FROM property_values WHERE property_id = ?",
+                arguments: [propertyID]
+            )
+            for row in rows {
+                let pvID: String = row["id"]
+                let textValue: String? = row["text_value"]
+                guard let textValue, !textValue.isEmpty else { continue }
+                let tags = MultiSelectValue.decode(textValue)
+                let filtered = tags.filter {
+                    $0.caseInsensitiveCompare(trimmed) != .orderedSame
+                }
+                guard filtered.count != tags.count else { continue }
+                let newValue = MultiSelectValue.encode(filtered)
+                try db.execute(
+                    sql: """
+                        UPDATE property_values
+                        SET text_value = ?, updated_at = ?
+                        WHERE id = ?
+                    """,
+                    arguments: [
+                        newValue.isEmpty ? nil : newValue,
+                        now,
+                        pvID
+                    ]
+                )
+            }
+        case "select":
+            // Single-value column — null out matches.
+            try db.execute(
+                sql: """
+                    UPDATE property_values
+                    SET text_value = NULL, updated_at = ?
+                    WHERE property_id = ?
+                      AND text_value IS NOT NULL
+                      AND LOWER(text_value) = LOWER(?)
+                """,
+                arguments: [now, propertyID, trimmed]
+            )
+        default:
+            // Other property types don't store option-keyed values;
+            // dropping the option from the config is the whole job.
+            break
+        }
+    }
+
+    /// Append a new option to a select / multiSelect property's
+    /// `config.options` list. Idempotent — duplicate or case-folded
+    /// duplicates are silently dropped, so calling this from a UI
+    /// "type a new value" affordance doesn't spam the options array.
+    static func addPropertyOption(
+        _ db: Database,
+        propertyID: String,
+        option: String
+    ) throws {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let existing = (try String.fetchOne(
+            db,
+            sql: "SELECT config_json FROM properties WHERE id = ?",
+            arguments: [propertyID]
+        )) ?? "{}"
+        var config = PropertyConfig.parse(existing)
+        var options = config.options ?? []
+        if options.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return
+        }
+        options.append(trimmed)
+        config.options = options
+        try db.execute(
+            sql: "UPDATE properties SET config_json = ?, updated_at = ? WHERE id = ?",
+            arguments: [config.encoded(), now, propertyID]
+        )
+    }
+
     static func deleteRecord(_ db: Database, recordID: String) throws {
         // Log every record deletion so the boot trace log can prove whether
         // record loss came from explicit user action vs. some other path
@@ -1209,7 +1328,25 @@ enum DBWrites {
     /// so the file is content-hashed and copied into Assets/, then promotes
     /// the new asset to cover. Returns the resulting asset record.
     static func importCoverImage(_ db: Database, fileURL: URL, recordID: String, workspaceID: String) throws -> AssetRecord {
-        let asset = try AssetImporter.importFile(db, fileURL: fileURL, recordID: recordID, workspaceID: workspaceID)
+        // Re-encode the picked / dropped file to normalized HEIC at
+        // 800-px max before handing it to `AssetImporter`. Same
+        // rationale as `CoverImageImporter.attachAsCover` — the network
+        // path and the UI-picker path both produce normalized covers,
+        // so storage + decode behavior is uniform across origins.
+        // Falls back to the original file on any re-encode error.
+        let sourceURL: URL
+        let temp: URL?
+        if let reencoded = CoverImageReencoder.reencodeFile(at: fileURL) {
+            sourceURL = reencoded
+            temp = reencoded
+        } else {
+            sourceURL = fileURL
+            temp = nil
+        }
+        defer {
+            if let temp { try? FileManager.default.removeItem(at: temp) }
+        }
+        let asset = try AssetImporter.importFile(db, fileURL: sourceURL, recordID: recordID, workspaceID: workspaceID)
         try setRecordCover(db, recordID: recordID, assetID: asset.id)
         return asset
     }

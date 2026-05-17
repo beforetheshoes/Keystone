@@ -2248,4 +2248,576 @@ enum Schema {
             """
         )
     }
+
+    /// Local-only diagnostic log of CloudKit sync activity. Owned by the
+    /// sync layer, deliberately NOT registered with `SyncEngine.tables` /
+    /// `privateTables` — events are per-device observability, not user
+    /// data, and pushing them through CloudKit would amplify writes
+    /// without any benefit (each device sees its own engine activity).
+    static func createSyncEventsV40(_ db: Database) throws {
+        try db.execute(sql: #"""
+            CREATE TABLE IF NOT EXISTS sync_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+              event_type TEXT NOT NULL,
+              record_type TEXT NOT NULL DEFAULT '',
+              record_id TEXT NOT NULL DEFAULT '',
+              error_code TEXT NOT NULL DEFAULT '',
+              details TEXT NOT NULL DEFAULT ''
+            )
+        """#)
+        try db.execute(sql: #"""
+            CREATE INDEX IF NOT EXISTS sync_events_timestamp_idx
+              ON sync_events(timestamp DESC)
+        """#)
+        try db.execute(sql: #"""
+            CREATE INDEX IF NOT EXISTS sync_events_event_type_idx
+              ON sync_events(event_type)
+        """#)
+    }
+
+    /// v41 — unify Restaurants into Vendors as a saved view.
+    ///
+    /// Goal: adding a restaurant is one step (search Apple Maps, pick a
+    /// result) instead of two (create Restaurant, then attach a Vendor).
+    /// To get there cleanly, Restaurants becomes a *view* of the
+    /// `vendors` database with `kind = "restaurant"` pinned. Existing
+    /// restaurants records are merged into their linked vendor — or a
+    /// fresh vendor is materialized when no link exists — and the
+    /// `restaurants` database row is retired.
+    ///
+    /// Restaurant-specific properties (cuisine, price_range, rating,
+    /// status, last_visited, hours) move onto `vendors` with
+    /// `applicable_kinds: ["restaurant"]` so non-restaurant Vendor
+    /// records don't surface them in their detail view.
+    ///
+    /// Idempotent. Re-running is safe: every INSERT uses OR IGNORE, the
+    /// records-merge loop only fires while a `restaurants` database row
+    /// still exists, and the schema extensions to `views` are guarded by
+    /// `addColumnIfMissing`. Skips fresh installs where the workspace
+    /// hasn't been seeded yet — `Seed.runIfEmpty` writes the same final
+    /// shape from a single source of truth on first launch.
+    static func seedRestaurantsAsVendorsViewV41(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+
+        // 1. Extend the `views` table with sidebar-display columns. The
+        //    table was carved at v1 (id/database_id/workspace_id/name/
+        //    type/query_json/presentation_json) but never populated; we
+        //    now use it for the Restaurants view, which needs an area
+        //    binding, an order, and a glyph/accent so the sidebar can
+        //    render it next to real databases. The ALTER runs ahead of
+        //    the workspace guard below so fresh installs (where
+        //    `Seed.runIfEmpty` writes the view row a beat later) see
+        //    the extended schema too.
+        try addColumnIfMissing(db, table: "views", column: "area_id",     definition: "TEXT")
+        try addColumnIfMissing(db, table: "views", column: "sort_index",  definition: "REAL NOT NULL DEFAULT 0")
+        try addColumnIfMissing(db, table: "views", column: "icon",        definition: "TEXT")
+        try addColumnIfMissing(db, table: "views", column: "accent",      definition: "TEXT NOT NULL DEFAULT 'graphite'")
+        try addColumnIfMissing(db, table: "views", column: "plural_name", definition: "TEXT")
+
+        guard let workspaceID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM workspaces ORDER BY created_at LIMIT 1"
+        ) else { return }
+
+        // 2. Add restaurant-only properties to `vendors`. Each carries
+        //    `applicable_kinds: ["restaurant"]` so the detail view hides
+        //    them on non-restaurant vendor records, and generic table /
+        //    list views (the plain Vendors database) hide them as
+        //    columns. The Restaurants view promotes them.
+        struct VProp { let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let restKinds = #""applicable_kinds":["restaurant"]"#
+        let vprops: [VProp] = [
+            .init(key: "cuisine",      label: "Cuisine",      type: "select", sort: 1.1,  cfg: "{\(restKinds)}"),
+            .init(key: "price_range",  label: "Price",        type: "select", sort: 1.2,  cfg: "{\"options\":[\"$\",\"$$\",\"$$$\",\"$$$$\"],\(restKinds)}"),
+            .init(key: "rating",       label: "Rating",       type: "number", sort: 1.3,  cfg: "{\(restKinds)}"),
+            .init(key: "status",       label: "Status",       type: "select", sort: 1.4,  cfg: "{\"options\":[\"want_to_try\",\"visited\"],\(restKinds)}"),
+            .init(key: "last_visited", label: "Last visited", type: "date",   sort: 1.5,  cfg: "{\(restKinds)}"),
+            .init(key: "hours",        label: "Hours",        type: "text",   sort: 1.6,  cfg: "{\(restKinds)}"),
+        ]
+        for p in vprops {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "vendors.\(p.key)", "vendors",
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+
+        // 3. Migrate every record in the `restaurants` database into
+        //    Vendors. Two flavors:
+        //    a. Records with a `restaurants.vendor` relation → fold the
+        //       restaurant's properties onto the linked vendor.
+        //    b. Records without a linked vendor → materialize a fresh
+        //       vendor carrying the restaurant's title + properties.
+        //    In both cases we set `kind = "restaurant"`, then delete the
+        //    restaurant record. Property values cascade off (v37 dropped
+        //    the property FK on property_values, but we DELETE by
+        //    record_id, not property_id, which still cascades via the
+        //    records FK).
+        try migrateRestaurantsIntoVendorsV41(db, now: now)
+
+        // 4. Insert the Restaurants view row. Points at `vendors`,
+        //    pins `kind = "restaurant"` in its query, and names
+        //    `"restaurant"` as the lookup provider — the registry
+        //    resolves that to a MapKit variant constrained to food /
+        //    drink POI categories.
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO views (
+                    id, database_id, workspace_id, name, plural_name,
+                    type, query_json, presentation_json,
+                    icon, accent, area_id, sort_index,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                "view-restaurants", "vendors", workspaceID,
+                "Restaurants", "Restaurants",
+                "table",
+                #"{"kind":["restaurant"]}"#,
+                #"{"lookupProvider":"restaurant"}"#,
+                "Re", "iris", "area-collections", 8.3,
+                now, now
+            ]
+        )
+
+        // 5. Retire the `restaurants` database. Properties first (so
+        //    they don't dangle), then the database row itself.
+        try db.execute(sql: "DELETE FROM properties WHERE database_id = 'restaurants'")
+        try db.execute(sql: "DELETE FROM databases WHERE id = 'restaurants'")
+    }
+
+    /// Worker for `seedRestaurantsAsVendorsViewV41`. Pulled out so the
+    /// migration body stays readable and the row-by-row merge logic is
+    /// testable in isolation. Idempotent: re-running after the
+    /// `restaurants` database is already gone is a no-op.
+    private static func migrateRestaurantsIntoVendorsV41(_ db: Database, now: String) throws {
+        // Heads up: if the restaurants database has already been
+        // dropped on this device, there's nothing to migrate.
+        let restaurantsExists = (try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM databases WHERE id = 'restaurants'"
+        ) ?? 0) > 0
+        guard restaurantsExists else { return }
+
+        // Resolve the `restaurants.vendor` property id once. Older
+        // workspaces may have created the property under a different
+        // id; fall back to a (database_id, key) lookup.
+        let vendorRelPropID: String? = (try? String.fetchOne(
+            db,
+            sql: """
+                SELECT id FROM properties
+                WHERE database_id = 'restaurants' AND key = 'vendor'
+                LIMIT 1
+            """
+        ))
+
+        // Per-record copy list. Each entry maps a restaurants property
+        // key to a vendors property key — usually identical, but spelled
+        // out so renames (none right now) are obvious.
+        let copyKeys: [(restKey: String, vendKey: String)] = [
+            ("cuisine",      "cuisine"),
+            ("price_range",  "price_range"),
+            ("rating",       "rating"),
+            ("status",       "status"),
+            ("last_visited", "last_visited"),
+        ]
+        // Resolve property ids on both sides. Skip entries whose Vendor
+        // counterpart is missing (shouldn't happen post step 2 above,
+        // but defensive).
+        struct PropPair { let restID: String; let vendID: String; let vendKey: String }
+        var copyPairs: [PropPair] = []
+        for (restKey, vendKey) in copyKeys {
+            guard let rid = try String.fetchOne(
+                db,
+                sql: "SELECT id FROM properties WHERE database_id = 'restaurants' AND key = ? LIMIT 1",
+                arguments: [restKey]
+            ) else { continue }
+            guard let vid = try String.fetchOne(
+                db,
+                sql: "SELECT id FROM properties WHERE database_id = 'vendors' AND key = ? LIMIT 1",
+                arguments: [vendKey]
+            ) else { continue }
+            copyPairs.append(PropPair(restID: rid, vendID: vid, vendKey: vendKey))
+        }
+        // Notes is handled specially (append rather than overwrite).
+        let restNotesPropID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM properties WHERE database_id = 'restaurants' AND key = 'notes' LIMIT 1"
+        )
+        let vendNotesPropID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM properties WHERE database_id = 'vendors' AND key = 'notes' LIMIT 1"
+        )
+        let vendKindPropID = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM properties WHERE database_id = 'vendors' AND key = 'kind' LIMIT 1"
+        )
+
+        // Walk every surviving restaurants record.
+        let restaurantRows = try Row.fetchAll(db, sql: """
+            SELECT id, title, glyph, tone, sort_index, cover_asset_id
+            FROM records
+            WHERE database_id = 'restaurants' AND deleted_at IS NULL
+        """)
+        for rec in restaurantRows {
+            let restID: String = rec["id"]
+            let restTitle: String = rec["title"]
+
+            // Find the linked vendor record id, if any. Multi-target
+            // relations are rare here; first wins.
+            var vendorID: String? = nil
+            if let propID = vendorRelPropID {
+                vendorID = try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT target_record_id FROM relations
+                        WHERE source_record_id = ? AND property_id = ?
+                        LIMIT 1
+                    """,
+                    arguments: [restID, propID]
+                )
+            }
+
+            // No linked vendor → materialize one carrying the restaurant's
+            // identity. New vendor row keeps the restaurant's cover_asset_id
+            // (cover images often point at a hero shot the user picked) and
+            // its sort_index relative to the bottom of the vendors list.
+            if vendorID == nil {
+                let newID = UUID().uuidString
+                let glyph: String = rec["glyph"] ?? makeGlyph(from: restTitle)
+                let tone: String = rec["tone"] ?? "graphite"
+                let coverAssetID: String? = rec["cover_asset_id"]
+                let nextSort = (try Double.fetchOne(
+                    db,
+                    sql: "SELECT MAX(sort_index) FROM records WHERE database_id = 'vendors'"
+                ) ?? -1) + 1
+                try db.execute(
+                    sql: """
+                        INSERT INTO records
+                            (id, database_id, title, glyph, tone, cover_asset_id,
+                             created_at, updated_at, sort_index)
+                        VALUES (?, 'vendors', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    arguments: [newID, restTitle, glyph, tone, coverAssetID, now, now, nextSort]
+                )
+                vendorID = newID
+            }
+            guard let targetVendorID = vendorID else { continue }
+
+            // Copy each restaurant property value to the matching vendor
+            // property. We only write when the source value exists and
+            // the vendor doesn't already have a non-empty value (don't
+            // clobber a manually-curated vendor field).
+            for pair in copyPairs {
+                guard let srcRow = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT text_value, number_value, date_value, json_value
+                        FROM property_values
+                        WHERE record_id = ? AND property_id = ?
+                        LIMIT 1
+                    """,
+                    arguments: [restID, pair.restID]
+                ) else { continue }
+                let text: String? = srcRow["text_value"]
+                let number: Double? = srcRow["number_value"]
+                let date: String? = srcRow["date_value"]
+                let json: String? = srcRow["json_value"]
+                let hasSourceValue = (text != nil && !(text ?? "").isEmpty)
+                    || number != nil
+                    || (date != nil && !(date ?? "").isEmpty)
+                    || (json != nil && !(json ?? "").isEmpty)
+                guard hasSourceValue else { continue }
+
+                // Vendor already has a value? Don't overwrite.
+                let existing: String? = try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COALESCE(text_value, CAST(number_value AS TEXT), date_value, json_value)
+                        FROM property_values
+                        WHERE record_id = ? AND property_id = ?
+                        LIMIT 1
+                    """,
+                    arguments: [targetVendorID, pair.vendID]
+                )
+                if let existing, !existing.isEmpty { continue }
+
+                let pvID = "\(targetVendorID).\(pair.vendKey)"
+                try db.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO property_values
+                            (id, record_id, property_id, text_value, number_value, date_value, json_value, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    arguments: [pvID, targetVendorID, pair.vendID, text, number, date, json, now, now]
+                )
+            }
+
+            // Notes: append rather than overwrite so a manual vendor note
+            // doesn't get lost.
+            if let restNotesID = restNotesPropID, let vendNotesID = vendNotesPropID {
+                let restNotes: String = (try String.fetchOne(
+                    db,
+                    sql: "SELECT text_value FROM property_values WHERE record_id = ? AND property_id = ? LIMIT 1",
+                    arguments: [restID, restNotesID]
+                )) ?? ""
+                if !restNotes.isEmpty {
+                    let existing: String = (try String.fetchOne(
+                        db,
+                        sql: "SELECT text_value FROM property_values WHERE record_id = ? AND property_id = ? LIMIT 1",
+                        arguments: [targetVendorID, vendNotesID]
+                    )) ?? ""
+                    let combined = existing.isEmpty
+                        ? restNotes
+                        : (existing + "\n\n" + restNotes)
+                    let pvID = "\(targetVendorID).notes"
+                    try db.execute(
+                        sql: """
+                            INSERT OR REPLACE INTO property_values
+                                (id, record_id, property_id, text_value, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        arguments: [pvID, targetVendorID, vendNotesID, combined, now, now]
+                    )
+                }
+            }
+
+            // Stamp `kind = "restaurant"` on the vendor.
+            if let kindID = vendKindPropID {
+                let pvID = "\(targetVendorID).kind"
+                try db.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO property_values
+                            (id, record_id, property_id, text_value, created_at, updated_at)
+                        VALUES (?, ?, ?, 'restaurant', ?, ?)
+                    """,
+                    arguments: [pvID, targetVendorID, kindID, now, now]
+                )
+            }
+
+            // Re-point any incoming relations that named the old
+            // restaurant record to the merged vendor instead. Keeps,
+            // e.g., a calendar event that linked the restaurant as its
+            // venue working post-migration. Idempotent: a re-run
+            // re-points already-pointed relations to themselves and the
+            // (source, target, property) uniqueness shape from v27
+            // collapses any duplicates.
+            try db.execute(
+                sql: """
+                    UPDATE relations
+                    SET target_record_id = ?, updated_at = ?
+                    WHERE target_record_id = ?
+                """,
+                arguments: [targetVendorID, now, restID]
+            )
+
+            // Soft-delete won't do — we want the row gone so the
+            // post-migration sidebar count for restaurants reads zero.
+            // FK cascade on records → property_values clears the
+            // restaurant's own property_values; the restaurant's
+            // outgoing `restaurants.vendor` relation goes away with
+            // the source record.
+            try db.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [restID])
+        }
+    }
+
+    /// v42 — per-database view ergonomics (sort, group, filters, gallery
+    /// cover size). Local-only table: deliberately NOT registered with
+    /// `SyncEngine.tables` / `privateTables`. UI preferences are
+    /// per-device; pushing them through CloudKit would cause one
+    /// device's "sort by published_date" to overwrite another's "sort
+    /// by rating" every time the user switched between them.
+    static func createDatabaseViewPrefsV42(_ db: Database) throws {
+        try db.execute(sql: #"""
+            CREATE TABLE IF NOT EXISTS database_view_prefs (
+              database_id        TEXT PRIMARY KEY,
+              sort_key           TEXT,
+              sort_ascending     INTEGER NOT NULL DEFAULT 1,
+              group_key          TEXT,
+              gallery_cover_size TEXT NOT NULL DEFAULT 'medium',
+              filters_json       TEXT NOT NULL DEFAULT '[]',
+              updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+        """#)
+    }
+
+    /// v43 — descriptions on books (movies/tv already have `overview`)
+    /// plus a `tags` multiSelect property on all three collections so
+    /// the enrichment providers can write genres / categories. Property
+    /// rows are inserted with `OR IGNORE` so re-running is safe and a
+    /// user who already created their own `tags` column wins.
+    static func addCollectionsDescriptionAndTagsV43(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        struct PropAdd { let dbID: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let adds: [PropAdd] = [
+            .init(dbID: "books",    key: "description", label: "Description", type: "text",        sort: 9.5, cfg: "{}"),
+            .init(dbID: "books",    key: "tags",        label: "Tags",        type: "multiSelect", sort: 9.6, cfg: "{}"),
+            .init(dbID: "movies",   key: "tags",        label: "Tags",        type: "multiSelect", sort: 8.5, cfg: "{}"),
+            .init(dbID: "tv_shows", key: "tags",        label: "Tags",        type: "multiSelect", sort: 9.5, cfg: "{}"),
+        ]
+        for p in adds {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.dbID).\(p.key)", p.dbID,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+    }
+
+    /// v48 — rename the restaurant `cuisine` property to "Tags" and
+    /// promote it from `.select` (single value) to `.multiSelect`
+    /// (chips). Existing single-string values transparently decode
+    /// as 1-element tag lists, so no per-record data migration is
+    /// needed — only the property's own row changes shape.
+    ///
+    /// The property's `key` stays `cuisine` to avoid touching
+    /// `property_values.property_id` references (`vendors.cuisine` →
+    /// would otherwise need a property-id rename + relink pass).
+    /// Users see "Tags"; the on-disk identifier is unchanged.
+    static func renameCuisineToTagsV48(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        try db.execute(
+            sql: """
+                UPDATE properties
+                SET name = 'Tags',
+                    type = 'multiSelect',
+                    updated_at = ?
+                WHERE id = 'vendors.cuisine'
+            """,
+            arguments: [now]
+        )
+    }
+
+    /// v47 — per-database hidden-columns preference. Backs the
+    /// "Columns…" toolbar menu so a user can hide noisy columns from
+    /// the table without losing the underlying property values. Stored
+    /// as a JSON array of property keys in
+    /// `database_view_prefs.hidden_columns_json`. Local-only, same
+    /// rationale as the rest of the table — sync-aware preferences
+    /// would let one device overwrite another's choices on every
+    /// switch.
+    static func addHiddenColumnsPrefV47(_ db: Database) throws {
+        // `ADD COLUMN … DEFAULT '[]' NOT NULL` would be cleaner but
+        // SQLite forbids non-constant defaults on ALTER; the plain
+        // DEFAULT keeps existing rows valid, and the reader treats
+        // NULL the same as `[]`.
+        try db.execute(sql: """
+            ALTER TABLE database_view_prefs
+                ADD COLUMN hidden_columns_json TEXT NOT NULL DEFAULT '[]'
+        """)
+    }
+
+    /// v46 — flip `vendors.place_id` to `hidden: true`. The property
+    /// is a durable Apple Maps identifier the user never types in
+    /// and never needs to see; previous schema versions surfaced it
+    /// as a "Apple Place ID" text field at sort 7, which is just
+    /// noise on the restaurant detail page.
+    ///
+    /// Idempotent: writes a fresh config_json with `hidden: true` +
+    /// any existing keys preserved, and bumps `sort_index` to 100
+    /// so anything that does fall through filters (e.g. CSV exports)
+    /// renders it last instead of mid-row.
+    static func hidePlaceIdV46(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT config_json FROM properties WHERE id = ?",
+            arguments: ["vendors.place_id"]
+        )
+        let existing: String = row?["config_json"] ?? "{}"
+        var obj: [String: Any] = (try? JSONSerialization.jsonObject(with: Data(existing.utf8))
+                                  as? [String: Any]) ?? [:]
+        obj["hidden"] = true
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let cfg = String(data: data, encoding: .utf8) else { return }
+        try db.execute(
+            sql: """
+                UPDATE properties SET config_json = ?, sort_index = 100, updated_at = ?
+                WHERE id = ?
+            """,
+            arguments: [cfg, now, "vendors.place_id"]
+        )
+    }
+
+    /// v45 — restaurant website-scrape enrichment. Adds a `menu_url`
+    /// property that the new `RestaurantWebsiteEnrichmentProvider` fills
+    /// from schema.org JSON-LD (or a `/menu` probe), plus a
+    /// `web_enriched_at` marker timestamp so the provider's pending
+    /// query short-circuits records it has already processed. Both are
+    /// scoped to restaurants via `applicable_kinds`.
+    static func addRestaurantWebsiteEnrichmentV45(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        struct PropAdd { let dbID: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let adds: [PropAdd] = [
+            .init(
+                dbID: "vendors", key: "menu_url", label: "Menu",
+                type: "url", sort: 1.7,
+                cfg: #"{"applicable_kinds":["restaurant"]}"#
+            ),
+            .init(
+                dbID: "vendors", key: "web_enriched_at", label: "Web enriched",
+                type: "date", sort: 100,
+                cfg: #"{"applicable_kinds":["restaurant"],"hidden":true}"#
+            ),
+        ]
+        for p in adds {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.dbID).\(p.key)", p.dbID,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+    }
+
+    /// v44 — reading progress on books (dual-mode: pages or percent)
+    /// and watch-progress on TV (current season / episode). Movies stay
+    /// binary — "watched" or not — because there's no meaningful
+    /// in-progress state for a single feature.
+    static func addCollectionsProgressV44(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        struct PropAdd { let dbID: String; let key: String; let label: String; let type: String; let sort: Double; let cfg: String }
+        let adds: [PropAdd] = [
+            // books — dual-mode progress
+            .init(dbID: "books", key: "readable_pages",   label: "Readable pages", type: "number", sort: 5.5, cfg: "{}"),
+            .init(dbID: "books", key: "progress_mode",    label: "Progress mode",  type: "select", sort: 6.1, cfg: #"{"options":["pages","percent"]}"#),
+            .init(dbID: "books", key: "current_page",     label: "Current page",   type: "number", sort: 6.2, cfg: "{}"),
+            .init(dbID: "books", key: "progress_percent", label: "Progress %",     type: "number", sort: 6.3, cfg: "{}"),
+            // tv_shows — current position
+            .init(dbID: "tv_shows", key: "current_season",  label: "Current season",  type: "number", sort: 7.1, cfg: "{}"),
+            .init(dbID: "tv_shows", key: "current_episode", label: "Current episode", type: "number", sort: 7.2, cfg: "{}"),
+        ]
+        for p in adds {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO properties
+                        (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                """,
+                arguments: [
+                    "\(p.dbID).\(p.key)", p.dbID,
+                    p.key, p.label, p.type, p.cfg, now, now, p.sort
+                ]
+            )
+        }
+    }
 }

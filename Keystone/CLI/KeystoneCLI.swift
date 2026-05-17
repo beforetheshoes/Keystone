@@ -60,6 +60,7 @@ enum KeystoneCLI {
             case "import-sidecars":     try importSidecars(args: rest)
             case "wipe-vehicle-maintenance": try wipeVehicleMaintenance(args: rest)
             case "maintenance-status":  try maintenanceStatus(args: rest)
+            case "sync-diagnose":       try syncDiagnose(args: rest)
             case "help", "-h", "--help":
                 printUsage()
             default:
@@ -733,6 +734,46 @@ enum KeystoneCLI {
         emit(payload)
     }
 
+    // MARK: - Sync diagnostics
+
+    /// Dump the same headline numbers + recent events the Settings →
+    /// Sync Diagnostics panel shows. JSON shape:
+    /// `{ engine_state, last_sync, events_24h, conflicts_24h, last_error,
+    ///   events: [...] }`. `--limit N` caps the events array (default 50).
+    /// `--hours N` widens the summary window (default 24).
+    private static func syncDiagnose(args: [String]) throws {
+        let limit = Int(flag("--limit", in: args) ?? "") ?? 50
+        let hours = Int(flag("--hours", in: args) ?? "") ?? 24
+
+        let summary = try SyncEventLogger.summary(within: hours)
+        let entries = try SyncEventLogger.recentEvents(limit: limit)
+
+        let events: [[String: Any]] = entries.map { e in
+            [
+                "id": e.id,
+                "timestamp": e.timestamp,
+                "event_type": e.eventType,
+                "record_type": e.recordType,
+                "record_id": e.recordID,
+                "error_code": e.errorCode,
+                "details": e.details,
+            ]
+        }
+
+        // CLI bootstraps with `configureSyncEngine: false` so the engine
+        // is never running here. Surface that explicitly so a reader
+        // doesn't mistake the empty stream for "engine quiet".
+        emit([
+            "engine_state": keystoneSyncEngineConfigured ? "configured" : "not_configured_in_cli",
+            "last_sync": (summary.lastSyncTimestamp as String?) as Any,
+            "events_window_hours": hours,
+            "events_total_in_window": summary.totalEvents,
+            "conflicts_in_window": summary.conflictEvents,
+            "last_error": (summary.lastErrorDetails as String?) as Any,
+            "events": events,
+        ])
+    }
+
     /// Drive an `async` task to completion from a synchronous CLI
     /// command. We can't just block on a semaphore — MapKit's
     /// network callbacks need the main thread's run loop to spin —
@@ -864,6 +905,9 @@ enum KeystoneCLI {
           import-sidecars --root <dir>                   upsert vehicle_maintenance records from sidecar frontmatter
           wipe-vehicle-maintenance [--yes]               delete every vehicle_maintenance record + assets (clean slate)
           maintenance-status [--vehicle "<title>"]       next-due/overdue report against the Service Catalog
+
+        Sync diagnostics:
+          sync-diagnose [--limit N] [--hours N]          recent CloudKit sync events + headline counters
 
         Escape hatch:
           sql "<query>"                                  raw SQL; reads return JSON, writes return {ok:true}

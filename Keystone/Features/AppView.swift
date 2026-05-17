@@ -27,11 +27,18 @@ struct AppView: View {
                     store: store,
                     databaseID: lookup.databaseID,
                     databaseName: lookup.databaseName,
+                    lookupProviderKey: lookup.lookupProviderKey,
+                    presetKind: lookup.presetKind,
                     existingRecordID: lookup.existingRecordID,
                     initialQuery: lookup.initialQuery
                 )
                 .transition(.opacity)
                 .zIndex(3)
+            }
+            if let coverSheet = store.coverPickerSheet {
+                CoverPickerSheet(store: store, state: coverSheet)
+                    .transition(.opacity)
+                    .zIndex(3)
             }
             // App-launch privacy lock. Sits above every other overlay so
             // a deep link / palette pre-fetch can never sneak protected
@@ -75,6 +82,25 @@ private struct MacMainPane: View {
             } else {
                 Color(KstColor.paper0)
             }
+        case let .view(viewID):
+            if let view = store.views.first(where: { $0.id == viewID }),
+               let backing = store.currentDB,
+               backing.id == view.databaseID {
+                let header = DBRow(
+                    id: view.id,
+                    areaID: view.areaID,
+                    name: view.name,
+                    pluralName: view.pluralName,
+                    icon: view.icon,
+                    accent: view.accent,
+                    defaultView: backing.defaultView,
+                    sortIndex: view.sortIndex,
+                    recordCount: store.filteredRecords.count
+                )
+                DatabaseDetailView(store: store, db: header)
+            } else {
+                Color(KstColor.paper0)
+            }
         case let .record(_, recordID):
             if store.hiddenRecordIDs.contains(recordID) {
                 // Record exists but is currently hidden by the privacy
@@ -99,6 +125,17 @@ private struct MacMainPane: View {
                     store.send(.logServiceForVehicle(vehicleID: vehicleID))
                 }
             )
+        case let .stats(dbID):
+            if let db = store.currentDB, db.id == dbID {
+                StatsDetailView(
+                    store: store,
+                    db: db,
+                    properties: store.currentProperties,
+                    records: store.currentRecords
+                )
+            } else {
+                Color(KstColor.paper0)
+            }
         }
     }
 }

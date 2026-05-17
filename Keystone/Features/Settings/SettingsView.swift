@@ -71,6 +71,8 @@ struct SettingsView: View {
 
             AttachmentsSection()
 
+            SyncDiagnosticsSection()
+
             Section {
                 Toggle("Open new records in detail view", isOn: $openInDetailAfterAdd)
             } header: {

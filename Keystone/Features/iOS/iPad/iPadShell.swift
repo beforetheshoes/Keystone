@@ -9,6 +9,11 @@ import ComposableArchitecture
 struct iPadShell: View {
     @Bindable var store: StoreOf<AppFeature>
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
+    /// iPad has no `Settings { … }` scene (that's a macOS-only menu
+    /// hook), so Settings is presented as a sheet from a toolbar gear.
+    /// Sheet over push to keep navigation state clean across tab/route
+    /// changes — Settings is incidental to whatever you're looking at.
+    @State private var settingsSheetOpen = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -29,11 +34,28 @@ struct iPadShell: View {
                                 Image(systemName: "plus")
                             }
                         }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button { settingsSheetOpen = true } label: {
+                                Image(systemName: "gearshape")
+                            }
+                        }
                     }
             }
         }
         .navigationSplitViewStyle(.balanced)
         .background(KstColor.paper0)
+        .sheet(isPresented: $settingsSheetOpen) {
+            NavigationStack {
+                SettingsView()
+                    .navigationTitle("Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { settingsSheetOpen = false }
+                        }
+                    }
+            }
+        }
     }
 
     @ViewBuilder
@@ -44,6 +66,30 @@ struct iPadShell: View {
         case let .database(dbID):
             if let db = store.currentDB, db.id == dbID {
                 DatabaseDetailView(store: store, db: db)
+            } else {
+                Color(KstColor.paper0)
+            }
+        case let .view(viewID):
+            // Saved view: render with the same detail UI as a database
+            // route, but synthesize a header DBRow from the view so the
+            // breadcrumb and accent match what the user tapped in the
+            // sidebar (the underlying database is "Vendors" but the
+            // page is titled "Restaurants").
+            if let view = store.views.first(where: { $0.id == viewID }),
+               let backing = store.currentDB,
+               backing.id == view.databaseID {
+                let header = DBRow(
+                    id: view.id,
+                    areaID: view.areaID,
+                    name: view.name,
+                    pluralName: view.pluralName,
+                    icon: view.icon,
+                    accent: view.accent,
+                    defaultView: backing.defaultView,
+                    sortIndex: view.sortIndex,
+                    recordCount: store.filteredRecords.count
+                )
+                DatabaseDetailView(store: store, db: header)
             } else {
                 Color(KstColor.paper0)
             }
@@ -66,6 +112,17 @@ struct iPadShell: View {
                     store.send(.logServiceForVehicle(vehicleID: vehicleID))
                 }
             )
+        case let .stats(dbID):
+            if let db = store.currentDB, db.id == dbID {
+                StatsDetailView(
+                    store: store,
+                    db: db,
+                    properties: store.currentProperties,
+                    records: store.currentRecords
+                )
+            } else {
+                Color(KstColor.paper0)
+            }
         }
     }
 }

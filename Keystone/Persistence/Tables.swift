@@ -169,4 +169,11 @@ struct ViewDef: Identifiable, Equatable, Sendable {
     @Column("presentation_json") var presentationJSON: String
     @Column("created_at") var createdAt: String
     @Column("updated_at") var updatedAt: String
+    /// Sidebar grouping (added v41). Optional; when set, the view renders
+    /// as a sidebar row inside the named area alongside databases.
+    @Column("area_id") var areaID: String?
+    @Column("sort_index") var sortIndex: Double
+    var icon: String?
+    var accent: String
+    @Column("plural_name") var pluralName: String?
 }

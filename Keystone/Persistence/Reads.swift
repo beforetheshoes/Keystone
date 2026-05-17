@@ -34,6 +34,22 @@ struct PropertyRow: Equatable, Sendable, Identifiable {
         PropertyConfig.parse(configJSON)
     }
 
+    /// True when this property should be shown given the supplied
+    /// kind context. The detail view passes the record's actual `kind`
+    /// value; list/table views in a kind-scoped view (e.g. Restaurants
+    /// over vendors) pass the view's pinned kind; generic list/table
+    /// views pass `nil` to hide every kind-scoped column.
+    ///
+    /// A property with no `applicable_kinds` constraint is universal
+    /// and always returns true.
+    func isVisible(forKind kind: String?) -> Bool {
+        if config.isHidden { return false }
+        let kinds = config.applicableKinds ?? []
+        if kinds.isEmpty { return true }
+        guard let kind, !kind.isEmpty else { return false }
+        return kinds.contains(kind)
+    }
+
     /// The column alignment to use in tables. Honors an explicit
     /// `alignment` from the property's config; otherwise falls back to a
     /// type-aware default — numbers and currency right, select/checkbox
@@ -66,13 +82,25 @@ struct PropertyConfig: Equatable, Sendable {
     /// When non-nil, the editor renders a pill that cycles through the
     /// list on tap; when nil, the property accepts free-form text.
     var options: [String]?
+    /// Kind values (`vendors.kind` etc.) this property applies to. When
+    /// non-nil and non-empty, the detail view hides this property unless
+    /// the record's `kind` value is in the list — and generic list/table
+    /// views hide the column unless they're in a kind-scoped view
+    /// context (e.g. the Restaurants view). When nil/empty, the property
+    /// applies to records of every kind in its database.
+    var applicableKinds: [String]?
+    /// Property exists in the schema but is suppressed from every UI
+    /// surface (detail view, list/table columns, filters). Used for
+    /// marker rows like `web_enriched_at` that the enrichment service
+    /// reads/writes but the user never needs to see.
+    var isHidden: Bool
     /// Verbatim JSON-encoded blob of other keys we don't model directly
     /// here (e.g. `targetDatabaseID` for relations). Stored as a string
     /// so the struct stays `Sendable` — writes round-trip via `encoded()`
     /// without stripping these keys.
     var rawExtrasJSON: String
 
-    static let empty = PropertyConfig(alignment: nil, format: nil, currencyCode: nil, options: nil, rawExtrasJSON: "{}")
+    static let empty = PropertyConfig(alignment: nil, format: nil, currencyCode: nil, options: nil, applicableKinds: nil, isHidden: false, rawExtrasJSON: "{}")
 
     static func parse(_ json: String) -> PropertyConfig {
         guard let data = json.data(using: .utf8),
@@ -90,16 +118,24 @@ struct PropertyConfig: Equatable, Sendable {
             let strings = raw.compactMap { $0 as? String }
             return strings.count == raw.count ? strings : nil
         }()
+        let applicableKinds: [String]? = {
+            guard let raw = obj["applicable_kinds"] as? [Any] else { return nil }
+            let strings = raw.compactMap { $0 as? String }
+            return strings.count == raw.count ? strings : nil
+        }()
+        let isHidden = (obj["hidden"] as? Bool) ?? false
         extras.removeValue(forKey: "alignment")
         extras.removeValue(forKey: "format")
         extras.removeValue(forKey: "currencyCode")
         extras.removeValue(forKey: "options")
+        extras.removeValue(forKey: "applicable_kinds")
+        extras.removeValue(forKey: "hidden")
         let extrasJSON: String = {
             guard let data = try? JSONSerialization.data(withJSONObject: extras),
                   let str = String(data: data, encoding: .utf8) else { return "{}" }
             return str
         }()
-        return PropertyConfig(alignment: alignment, format: format, currencyCode: code, options: options, rawExtrasJSON: extrasJSON)
+        return PropertyConfig(alignment: alignment, format: format, currencyCode: code, options: options, applicableKinds: applicableKinds, isHidden: isHidden, rawExtrasJSON: extrasJSON)
     }
 
     /// Re-encode the config back to a JSON string, preserving any
@@ -115,6 +151,8 @@ struct PropertyConfig: Equatable, Sendable {
         if let format { obj["format"] = format.rawValue }
         if let currencyCode { obj["currencyCode"] = currencyCode }
         if let options { obj["options"] = options }
+        if let applicableKinds { obj["applicable_kinds"] = applicableKinds }
+        if isHidden { obj["hidden"] = true }
         guard let data = try? JSONSerialization.data(withJSONObject: obj),
               let str = String(data: data, encoding: .utf8) else {
             return "{}"
@@ -163,14 +201,57 @@ struct RecordRow: Equatable, Sendable, Identifiable {
     }
 }
 
+/// A "view" — a saved filter/presentation over an underlying database.
+/// Restaurants is a view over `vendors` with `kind = "restaurant"`
+/// pinned. Surfaces in the sidebar next to real databases.
+struct ViewRow: Equatable, Sendable, Identifiable {
+    let id: String
+    /// Backing database — record fetches go against this table.
+    let databaseID: String
+    let name: String
+    let pluralName: String?
+    let icon: String
+    let accent: AccentTone
+    let areaID: String?
+    let sortIndex: Double
+    /// `query_json` decoded: a property-key → list-of-values map. Every
+    /// record in the view satisfies `values[key] ∈ list` for each key
+    /// in the dict. Used both as the initial filter set and as a pinned
+    /// (non-removable) constraint.
+    let queryFilters: [String: [String]]
+    /// `presentation_json.lookupProvider` — when set, the view's "+ New"
+    /// button uses this registry key instead of the database key (so the
+    /// Restaurants view can pick a food-only MapKit variant even though
+    /// it's nominally a Vendors view).
+    let lookupProviderKey: String?
+    /// Live record count after applying `queryFilters` against the
+    /// backing database. The sidebar row uses this to show the
+    /// matching count next to the view's name (so "Restaurants 12"
+    /// reads the same way "Books 278" does).
+    var recordCount: Int = 0
+
+    /// The single kind value this view pins, if its query filter is
+    /// shaped like `{"kind": ["<one>"]}`. Used by list/table views to
+    /// scope column visibility via `PropertyRow.isVisible(forKind:)`.
+    /// Returns `nil` when the view doesn't pin a single kind.
+    var pinnedKind: String? {
+        guard let kinds = queryFilters["kind"], kinds.count == 1 else { return nil }
+        return kinds[0]
+    }
+}
+
 struct PaletteItem: Equatable, Sendable, Identifiable {
-    enum Kind: String, Sendable, Equatable { case database, record, action }
+    enum Kind: String, Sendable, Equatable { case database, record, action, view }
     let id: String
     let kind: Kind
     let label: String
     let sub: String
     let glyph: String
     let tone: AccentTone
+    /// For `.database` — the database id. For `.record` — the record's
+    /// containing database id. For `.view` — the *view* id (the palette
+    /// dispatcher routes through `Nav.view`, not `Nav.database`). For
+    /// `.action` — nil.
     let dbID: String?
 }
 
@@ -210,6 +291,127 @@ enum DBReads {
 
     static func database(_ db: Database, id: String) throws -> DBRow? {
         try databases(db).first(where: { $0.id == id })
+    }
+
+    /// Every view registered for sidebar display. Skips rows without
+    /// `area_id` set — those are pre-v41 / legacy unattached views and
+    /// the sidebar has nowhere to render them.
+    static func views(_ db: Database) throws -> [ViewRow] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, database_id, name, plural_name, icon, accent,
+                   area_id, sort_index, query_json, presentation_json
+            FROM views
+            WHERE area_id IS NOT NULL AND database_id IS NOT NULL
+            ORDER BY sort_index
+        """)
+        return try rows.compactMap { row -> ViewRow? in
+            let databaseID: String? = row["database_id"]
+            guard let backing = databaseID else { return nil }
+            let queryJSON: String = row["query_json"] ?? "{}"
+            let queryFilters = parseQueryFilters(queryJSON)
+            let presentationJSON: String = row["presentation_json"] ?? "{}"
+            let lookupProvider = parseLookupProvider(presentationJSON)
+            let count = try viewRecordCount(db, databaseID: backing, queryFilters: queryFilters)
+            return ViewRow(
+                id: row["id"],
+                databaseID: backing,
+                name: row["name"],
+                pluralName: row["plural_name"],
+                icon: row["icon"] ?? "",
+                accent: AccentTone(rawValue: row["accent"] ?? "graphite") ?? .graphite,
+                areaID: row["area_id"],
+                sortIndex: row["sort_index"] ?? 0,
+                queryFilters: queryFilters,
+                lookupProviderKey: lookupProvider,
+                recordCount: count
+            )
+        }
+    }
+
+    /// Count records in `databaseID` that satisfy every `(key → values)`
+    /// entry in `queryFilters`. The filters are AND'd; within a key,
+    /// values are OR'd (any match qualifies). Empty `queryFilters`
+    /// collapses to a plain database count.
+    ///
+    /// Each key contributes an `IN (SELECT pv.record_id …)` subquery
+    /// keyed by the property's stable id (`<databaseID>.<key>`).
+    private static func viewRecordCount(
+        _ db: Database,
+        databaseID: String,
+        queryFilters: [String: [String]]
+    ) throws -> Int {
+        guard !queryFilters.isEmpty else {
+            return try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM records
+                    WHERE database_id = ? AND deleted_at IS NULL
+                """,
+                arguments: [databaseID]
+            ) ?? 0
+        }
+        var clauses: [String] = []
+        var arguments: [DatabaseValueConvertible] = [databaseID]
+        for (key, rawValues) in queryFilters {
+            let values = rawValues.filter { !$0.isEmpty }
+            guard !values.isEmpty else { continue }
+            let placeholders = Array(repeating: "?", count: values.count).joined(separator: ",")
+            clauses.append("""
+                r.id IN (
+                  SELECT pv.record_id FROM property_values pv
+                  WHERE pv.property_id = ?
+                    AND pv.text_value IN (\(placeholders))
+                )
+            """)
+            arguments.append("\(databaseID).\(key)")
+            arguments.append(contentsOf: values)
+        }
+        if clauses.isEmpty {
+            return try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM records
+                    WHERE database_id = ? AND deleted_at IS NULL
+                """,
+                arguments: [databaseID]
+            ) ?? 0
+        }
+        let sql = """
+            SELECT COUNT(*) FROM records r
+            WHERE r.database_id = ?
+              AND r.deleted_at IS NULL
+              AND \(clauses.joined(separator: " AND "))
+        """
+        return try Int.fetchOne(db, sql: sql, arguments: StatementArguments(arguments)) ?? 0
+    }
+
+    static func view(_ db: Database, id: String) throws -> ViewRow? {
+        try views(db).first(where: { $0.id == id })
+    }
+
+    private static func parseQueryFilters(_ json: String) -> [String: [String]] {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        var out: [String: [String]] = [:]
+        for (key, raw) in obj {
+            if let arr = raw as? [Any] {
+                let strings = arr.compactMap { $0 as? String }
+                if !strings.isEmpty { out[key] = strings }
+            } else if let one = raw as? String {
+                out[key] = [one]
+            }
+        }
+        return out
+    }
+
+    private static func parseLookupProvider(_ json: String) -> String? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let value = obj["lookupProvider"] as? String
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     static func properties(_ db: Database, databaseID: String) throws -> [PropertyRow] {
@@ -560,6 +762,21 @@ enum DBReads {
                 glyph: d.icon,
                 tone: d.accent,
                 dbID: d.id
+            ))
+        }
+        // Saved views (Restaurants, …) — palette dispatcher routes via
+        // `Nav.view`, not `Nav.database`, so picking the Restaurants
+        // palette result lands on the filtered-Vendors page.
+        let savedViews = try views(db)
+        for v in savedViews {
+            items.append(PaletteItem(
+                id: "view-\(v.id)",
+                kind: .view,
+                label: v.name,
+                sub: "View",
+                glyph: v.icon,
+                tone: v.accent,
+                dbID: v.id
             ))
         }
         let recRows = try Row.fetchAll(db, sql: """

@@ -5,21 +5,47 @@ import Dependencies
 
 struct iPhoneDatabaseListView: View {
     @Bindable var store: StoreOf<AppFeature>
+    /// Backing database the records list reads from. When the route is
+    /// a saved view (`viewID != nil`), this is the *view's* backing
+    /// database (e.g. `vendors` for the Restaurants view).
     var databaseID: String
+    /// Set when the route is a saved view. Drives the header label and
+    /// the view's pinned query filter for record narrowing.
+    var viewID: String?
+
+    init(store: StoreOf<AppFeature>, databaseID: String) {
+        self.store = store
+        self.databaseID = databaseID
+        self.viewID = nil
+    }
+
+    init(store: StoreOf<AppFeature>, viewID: String) {
+        self.store = store
+        self.viewID = viewID
+        // Backing database is resolved at task-time; the placeholder
+        // empty string never lasts past one tick (the `.task` block
+        // re-reads `dbRow` + `records` from the view).
+        self.databaseID = ""
+    }
 
     @Dependency(\.databaseClient) private var dbClient
     @State private var records: [RecordRow] = []
     @State private var dbRow: DBRow?
+    @State private var view: ViewRow?
+    @State private var resolvedDatabaseID: String = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Header
+                // Header — view-defined label/icon when we're rendering
+                // a saved view; otherwise the backing database's.
                 HStack(spacing: 10) {
-                    if let db = dbRow {
+                    if let view {
+                        Glyph(tone: view.accent, text: view.icon, size: 28, radius: 7)
+                    } else if let db = dbRow {
                         Glyph(tone: db.accent, text: db.icon, size: 28, radius: 7)
                     }
-                    Text(dbRow?.name ?? "")
+                    Text(view?.name ?? dbRow?.name ?? "")
                         .font(.kstDisplay(size: 28, weight: .semibold))
                         .kerning(-0.4)
                         .foregroundStyle(KstColor.ink0)
@@ -41,19 +67,8 @@ struct iPhoneDatabaseListView: View {
                 } else {
                     iOSCardList {
                         ForEach(records) { rec in
-                            // `iOSCardLinkRow` wires a `NavigationLink`
-                            // to the enclosing `NavigationStack` (the
-                            // one in `iPhoneHomeView`/`iPhoneSearchView`
-                            // declaring `.navigationDestination(for:
-                            // iPhoneRoute.self)`). Tapping the row
-                            // pushes the record-detail destination
-                            // automatically. The previous code called
-                            // `store.send(.setNav(...))`, which mutates
-                            // TCA state but doesn't append to the
-                            // local `@State path`, so the detail page
-                            // never appeared.
                             iOSCardLinkRow(
-                                value: iPhoneRoute.record(databaseID: databaseID, recordID: rec.id),
+                                value: iPhoneRoute.record(databaseID: resolvedDatabaseID, recordID: rec.id),
                                 leading: { RecordAvatar(record: rec, size: 30, radius: 8) },
                                 title: rec.title,
                                 subtitle: recordSubtitle(rec),
@@ -69,25 +84,92 @@ struct iPhoneDatabaseListView: View {
         .background(KstColor.paper0)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // "Stats" entry — Collections databases only. Pushes the
+            // shared `StatsDetailView` onto the navigation stack via
+            // `iPhoneRoute.stats`. Hidden on saved-view routes since
+            // their stats would be ambiguous (Restaurants doesn't have
+            // its own stats — it'd be Vendors' stats filtered).
+            if statsAvailable {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(value: iPhoneRoute.stats(databaseID: resolvedDatabaseID)) {
+                        Image(systemName: "chart.bar.xaxis")
+                    }
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    store.send(.createBlankRecord(databaseID: databaseID))
+                    if let v = view {
+                        store.send(.openLookup(databaseID: v.databaseID, databaseName: v.name))
+                    } else {
+                        store.send(.openLookup(databaseID: resolvedDatabaseID, databaseName: dbRow?.name ?? ""))
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
             }
         }
-        .task(id: databaseID) {
+        .task(id: taskKey) {
+            await reload()
+        }
+        .onChange(of: store.currentRecords) { _, _ in
+            reloadFromState()
+        }
+        .onChange(of: store.hiddenRecordIDs) { _, _ in
+            Task { await reload() }
+        }
+    }
+
+    private var taskKey: String { viewID ?? databaseID }
+
+    /// Only Collections databases get the stats button on iPhone.
+    /// Saved-view routes opt out — their stats would be the backing
+    /// database's, which the user reached separately via the parent
+    /// db.
+    private var statsAvailable: Bool {
+        guard viewID == nil else { return false }
+        return ["books", "movies", "tv_shows"].contains(resolvedDatabaseID)
+    }
+
+    private func reload() async {
+        if let viewID {
+            let v = try? dbClient.view(viewID)
+            view = v
+            if let v {
+                resolvedDatabaseID = v.databaseID
+                dbRow = try? dbClient.database(v.databaseID)
+                let all = (try? dbClient.records(v.databaseID, store.hiddenRecordIDs)) ?? []
+                records = applyViewFilter(all, view: v)
+            }
+        } else {
+            resolvedDatabaseID = databaseID
             dbRow = try? dbClient.database(databaseID)
             records = (try? dbClient.records(databaseID, store.hiddenRecordIDs)) ?? []
         }
-        .onChange(of: store.currentRecords) { _, new in
-            if case .database(let id) = store.nav, id == databaseID {
-                records = new
+    }
+
+    private func reloadFromState() {
+        if let viewID, let v = store.views.first(where: { $0.id == viewID }) {
+            // Re-derive from store.currentRecords when the store is
+            // already pointing at this view's backing database.
+            if store.nav == .view(viewID) {
+                records = applyViewFilter(store.currentRecords, view: v)
             }
+        } else if case .database(let id) = store.nav, id == databaseID {
+            records = store.currentRecords
         }
-        .onChange(of: store.hiddenRecordIDs) { _, _ in
-            records = (try? dbClient.records(databaseID, store.hiddenRecordIDs)) ?? []
+    }
+
+    /// Apply the view's `queryFilters` (currently a simple
+    /// `key ∈ values` shape, e.g. `{"kind": ["restaurant"]}`) to the
+    /// raw record list. AND-combines across keys; OR within each.
+    private func applyViewFilter(_ rows: [RecordRow], view: ViewRow) -> [RecordRow] {
+        guard !view.queryFilters.isEmpty else { return rows }
+        return rows.filter { row in
+            for (key, allowed) in view.queryFilters {
+                let v = row.values[key] ?? ""
+                if !allowed.contains(v) { return false }
+            }
+            return true
         }
     }
 

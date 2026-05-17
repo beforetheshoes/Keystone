@@ -52,7 +52,9 @@ enum Seed {
             DBSeed(key: "books",       name: "Books",       plural: "Books",       icon: "B",  accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.0),
             DBSeed(key: "movies",      name: "Movies",      plural: "Movies",      icon: "Mo", accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.1),
             DBSeed(key: "tv_shows",    name: "TV Shows",    plural: "TV Shows",    icon: "Tv", accent: "iris", area: "area-collections", defaultView: "gallery", sort: 8.2),
-            DBSeed(key: "restaurants", name: "Restaurants", plural: "Restaurants", icon: "Re", accent: "iris", area: "area-collections", defaultView: "table",   sort: 8.3),
+            // NB: Restaurants is no longer a database — see v41. It's
+            // seeded below as a saved view over `vendors` with
+            // `kind = "restaurant"` pinned.
         ]
         for d in dbs {
             try db.execute(
@@ -115,15 +117,26 @@ enum Seed {
             PropSeed(db: "vehicle_maintenance", key: "cost",    label: "Cost",    type: "number",   sort: 6),
             PropSeed(db: "vehicle_maintenance", key: "services", label: "Services", type: "relation", sort: 6.5),
             // vendors
-            PropSeed(db: "vendors", key: "name",     label: "Name",            type: "title",  sort: 0),
-            PropSeed(db: "vendors", key: "kind",     label: "Kind",            type: "select", sort: 1),
-            PropSeed(db: "vendors", key: "phone",    label: "Phone",           type: "phone",  sort: 2),
-            PropSeed(db: "vendors", key: "email",    label: "Email",           type: "email",  sort: 3),
-            PropSeed(db: "vendors", key: "website",  label: "Website",         type: "url",    sort: 4),
-            PropSeed(db: "vendors", key: "address",  label: "Address",         type: "address",sort: 5),
-            PropSeed(db: "vendors", key: "locality", label: "City",            type: "text",   sort: 5.5),
-            PropSeed(db: "vendors", key: "notes",    label: "Notes",           type: "text",   sort: 6),
-            PropSeed(db: "vendors", key: "place_id", label: "Apple Place ID",  type: "text",   sort: 7),
+            PropSeed(db: "vendors", key: "name",         label: "Name",            type: "title",  sort: 0),
+            PropSeed(db: "vendors", key: "kind",         label: "Kind",            type: "select", sort: 1),
+            // Restaurant-only vendor properties (v41). The applicable_kinds
+            // config keeps them hidden from non-restaurant vendor detail
+            // views and from generic Vendor table columns.
+            PropSeed(db: "vendors", key: "cuisine",      label: "Tags",            type: "multiSelect", sort: 1.1),
+            PropSeed(db: "vendors", key: "price_range",  label: "Price",           type: "select", sort: 1.2),
+            PropSeed(db: "vendors", key: "rating",       label: "Rating",          type: "number", sort: 1.3),
+            PropSeed(db: "vendors", key: "status",       label: "Status",          type: "select", sort: 1.4),
+            PropSeed(db: "vendors", key: "last_visited", label: "Last visited",    type: "date",   sort: 1.5),
+            PropSeed(db: "vendors", key: "hours",        label: "Hours",           type: "text",   sort: 1.6),
+            PropSeed(db: "vendors", key: "menu_url",     label: "Menu",            type: "url",    sort: 1.7),
+            PropSeed(db: "vendors", key: "phone",        label: "Phone",           type: "phone",  sort: 2),
+            PropSeed(db: "vendors", key: "email",        label: "Email",           type: "email",  sort: 3),
+            PropSeed(db: "vendors", key: "website",      label: "Website",         type: "url",    sort: 4),
+            PropSeed(db: "vendors", key: "address",      label: "Address",         type: "address",sort: 5),
+            PropSeed(db: "vendors", key: "locality",     label: "City",            type: "text",   sort: 5.5),
+            PropSeed(db: "vendors", key: "notes",        label: "Notes",           type: "text",   sort: 6),
+            PropSeed(db: "vendors", key: "place_id",     label: "Apple Place ID",  type: "text",   sort: 100),
+            PropSeed(db: "vendors", key: "web_enriched_at", label: "Web enriched",  type: "date",   sort: 100),
             // documents
             PropSeed(db: "documents", key: "name",    label: "Title",      type: "title",    sort: 0),
             PropSeed(db: "documents", key: "kind",    label: "Kind",       type: "select",   sort: 1),
@@ -173,49 +186,51 @@ enum Seed {
             PropSeed(db: "transportation", key: "cost",         label: "Cost",   type: "currency", sort: 5),
             PropSeed(db: "transportation", key: "notes",        label: "Notes",  type: "text",     sort: 6),
             // books
-            PropSeed(db: "books", key: "name",           label: "Title",     type: "title",  sort: 0),
-            PropSeed(db: "books", key: "author",         label: "Author",    type: "text",   sort: 1),
-            PropSeed(db: "books", key: "isbn",           label: "ISBN",      type: "text",   sort: 2),
-            PropSeed(db: "books", key: "publisher",      label: "Publisher", type: "text",   sort: 3),
-            PropSeed(db: "books", key: "published_date", label: "Published", type: "date",   sort: 4),
-            PropSeed(db: "books", key: "page_count",     label: "Pages",     type: "number", sort: 5),
-            PropSeed(db: "books", key: "status",         label: "Status",    type: "select", sort: 6),
-            PropSeed(db: "books", key: "rating",         label: "Rating",    type: "number", sort: 7),
-            PropSeed(db: "books", key: "started_date",   label: "Started",   type: "date",   sort: 8),
-            PropSeed(db: "books", key: "finished_date",  label: "Finished",  type: "date",   sort: 9),
-            PropSeed(db: "books", key: "notes",          label: "Notes",     type: "text",   sort: 10),
+            PropSeed(db: "books", key: "name",             label: "Title",          type: "title",       sort: 0),
+            PropSeed(db: "books", key: "author",           label: "Author",         type: "text",        sort: 1),
+            PropSeed(db: "books", key: "isbn",             label: "ISBN",           type: "text",        sort: 2),
+            PropSeed(db: "books", key: "publisher",        label: "Publisher",      type: "text",        sort: 3),
+            PropSeed(db: "books", key: "published_date",   label: "Published",      type: "date",        sort: 4),
+            PropSeed(db: "books", key: "page_count",       label: "Pages",          type: "number",      sort: 5),
+            PropSeed(db: "books", key: "readable_pages",   label: "Readable pages", type: "number",      sort: 5.5),
+            PropSeed(db: "books", key: "status",           label: "Status",         type: "select",      sort: 6),
+            PropSeed(db: "books", key: "progress_mode",    label: "Progress mode",  type: "select",      sort: 6.1),
+            PropSeed(db: "books", key: "current_page",     label: "Current page",   type: "number",      sort: 6.2),
+            PropSeed(db: "books", key: "progress_percent", label: "Progress %",     type: "number",      sort: 6.3),
+            PropSeed(db: "books", key: "rating",           label: "Rating",         type: "number",      sort: 7),
+            PropSeed(db: "books", key: "started_date",     label: "Started",        type: "date",        sort: 8),
+            PropSeed(db: "books", key: "finished_date",    label: "Finished",       type: "date",        sort: 9),
+            PropSeed(db: "books", key: "description",      label: "Description",    type: "text",        sort: 9.5),
+            PropSeed(db: "books", key: "tags",             label: "Tags",           type: "multiSelect", sort: 9.6),
+            PropSeed(db: "books", key: "notes",            label: "Notes",          type: "text",        sort: 10),
             // movies
-            PropSeed(db: "movies", key: "name",            label: "Title",         type: "title",  sort: 0),
-            PropSeed(db: "movies", key: "year",            label: "Year",          type: "number", sort: 1),
-            PropSeed(db: "movies", key: "tmdb_id",         label: "TMDB ID",       type: "text",   sort: 2),
-            PropSeed(db: "movies", key: "release_date",    label: "Released",      type: "date",   sort: 3),
-            PropSeed(db: "movies", key: "runtime_minutes", label: "Runtime (min)", type: "number", sort: 4),
-            PropSeed(db: "movies", key: "overview",        label: "Overview",      type: "text",   sort: 5),
-            PropSeed(db: "movies", key: "status",          label: "Status",        type: "select", sort: 6),
-            PropSeed(db: "movies", key: "rating",          label: "Rating",        type: "number", sort: 7),
-            PropSeed(db: "movies", key: "watched_date",    label: "Watched",       type: "date",   sort: 8),
-            PropSeed(db: "movies", key: "notes",           label: "Notes",         type: "text",   sort: 9),
+            PropSeed(db: "movies", key: "name",            label: "Title",         type: "title",       sort: 0),
+            PropSeed(db: "movies", key: "year",            label: "Year",          type: "number",      sort: 1),
+            PropSeed(db: "movies", key: "tmdb_id",         label: "TMDB ID",       type: "text",        sort: 2),
+            PropSeed(db: "movies", key: "release_date",    label: "Released",      type: "date",        sort: 3),
+            PropSeed(db: "movies", key: "runtime_minutes", label: "Runtime (min)", type: "number",      sort: 4),
+            PropSeed(db: "movies", key: "overview",        label: "Overview",      type: "text",        sort: 5),
+            PropSeed(db: "movies", key: "status",          label: "Status",        type: "select",      sort: 6),
+            PropSeed(db: "movies", key: "rating",          label: "Rating",        type: "number",      sort: 7),
+            PropSeed(db: "movies", key: "watched_date",    label: "Watched",       type: "date",        sort: 8),
+            PropSeed(db: "movies", key: "tags",            label: "Tags",          type: "multiSelect", sort: 8.5),
+            PropSeed(db: "movies", key: "notes",           label: "Notes",         type: "text",        sort: 9),
             // tv_shows
-            PropSeed(db: "tv_shows", key: "name",           label: "Title",        type: "title",  sort: 0),
-            PropSeed(db: "tv_shows", key: "year",           label: "Year",         type: "number", sort: 1),
-            PropSeed(db: "tv_shows", key: "tmdb_id",        label: "TMDB ID",      type: "text",   sort: 2),
-            PropSeed(db: "tv_shows", key: "first_air_date", label: "First aired",  type: "date",   sort: 3),
-            PropSeed(db: "tv_shows", key: "season_count",   label: "Seasons",      type: "number", sort: 4),
-            PropSeed(db: "tv_shows", key: "episode_count",  label: "Episodes",     type: "number", sort: 5),
-            PropSeed(db: "tv_shows", key: "overview",       label: "Overview",     type: "text",   sort: 6),
-            PropSeed(db: "tv_shows", key: "status",         label: "Status",       type: "select", sort: 7),
-            PropSeed(db: "tv_shows", key: "rating",         label: "Rating",       type: "number", sort: 8),
-            PropSeed(db: "tv_shows", key: "last_watched",   label: "Last watched", type: "date",   sort: 9),
-            PropSeed(db: "tv_shows", key: "notes",          label: "Notes",        type: "text",   sort: 10),
-            // restaurants
-            PropSeed(db: "restaurants", key: "name",         label: "Name",         type: "title",    sort: 0),
-            PropSeed(db: "restaurants", key: "vendor",       label: "Vendor",       type: "relation", sort: 1),
-            PropSeed(db: "restaurants", key: "cuisine",      label: "Cuisine",      type: "select",   sort: 2),
-            PropSeed(db: "restaurants", key: "price_range",  label: "Price",        type: "select",   sort: 3),
-            PropSeed(db: "restaurants", key: "rating",       label: "Rating",       type: "number",   sort: 4),
-            PropSeed(db: "restaurants", key: "status",       label: "Status",       type: "select",   sort: 5),
-            PropSeed(db: "restaurants", key: "last_visited", label: "Last visited", type: "date",     sort: 6),
-            PropSeed(db: "restaurants", key: "notes",        label: "Notes",        type: "text",     sort: 7),
+            PropSeed(db: "tv_shows", key: "name",            label: "Title",          type: "title",       sort: 0),
+            PropSeed(db: "tv_shows", key: "year",            label: "Year",           type: "number",      sort: 1),
+            PropSeed(db: "tv_shows", key: "tmdb_id",         label: "TMDB ID",        type: "text",        sort: 2),
+            PropSeed(db: "tv_shows", key: "first_air_date",  label: "First aired",    type: "date",        sort: 3),
+            PropSeed(db: "tv_shows", key: "season_count",    label: "Seasons",        type: "number",      sort: 4),
+            PropSeed(db: "tv_shows", key: "episode_count",   label: "Episodes",       type: "number",      sort: 5),
+            PropSeed(db: "tv_shows", key: "overview",        label: "Overview",       type: "text",        sort: 6),
+            PropSeed(db: "tv_shows", key: "status",          label: "Status",         type: "select",      sort: 7),
+            PropSeed(db: "tv_shows", key: "current_season",  label: "Current season", type: "number",      sort: 7.1),
+            PropSeed(db: "tv_shows", key: "current_episode", label: "Current episode",type: "number",      sort: 7.2),
+            PropSeed(db: "tv_shows", key: "rating",          label: "Rating",         type: "number",      sort: 8),
+            PropSeed(db: "tv_shows", key: "last_watched",    label: "Last watched",   type: "date",        sort: 9),
+            PropSeed(db: "tv_shows", key: "tags",            label: "Tags",           type: "multiSelect", sort: 9.5),
+            PropSeed(db: "tv_shows", key: "notes",           label: "Notes",          type: "text",        sort: 10),
+            // (Restaurants props live on `vendors` post-v41 — see above.)
         ]
         for p in props {
             let propID = "\(p.db).\(p.key)"
@@ -240,15 +255,25 @@ enum Seed {
                 case ("lodging",        "organization"): return #"{"targetDatabaseID":"vendors"}"#
                 case ("transportation", "trip"):         return #"{"targetDatabaseID":"trips"}"#
                 case ("transportation", "organization"): return #"{"targetDatabaseID":"vendors"}"#
-                case ("restaurants",    "vendor"):       return #"{"targetDatabaseID":"vendors"}"#
                 // Select properties with a fixed option list. Cycle-on-tap
                 // depends on this; without options the editor falls back
                 // to free-form text.
-                case ("books",       "status"):      return #"{"options":["to_read","reading","read","abandoned"]}"#
-                case ("movies",      "status"):      return #"{"options":["to_watch","watched","dropped"]}"#
-                case ("tv_shows",    "status"):      return #"{"options":["to_watch","watching","watched","dropped"]}"#
-                case ("restaurants", "status"):      return #"{"options":["want_to_try","visited"]}"#
-                case ("restaurants", "price_range"): return #"{"options":["$","$$","$$$","$$$$"]}"#
+                case ("books",       "status"):        return #"{"options":["to_read","reading","read","abandoned"]}"#
+                case ("books",       "progress_mode"): return #"{"options":["pages","percent"]}"#
+                case ("movies",      "status"):        return #"{"options":["to_watch","watched","dropped"]}"#
+                case ("tv_shows",    "status"):        return #"{"options":["to_watch","watching","watched","dropped"]}"#
+                // Restaurant-only vendor properties (v41). Each carries
+                // `applicable_kinds:["restaurant"]` so the detail view
+                // hides the field for non-restaurant vendors.
+                case ("vendors", "cuisine"):      return #"{"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "price_range"):  return #"{"options":["$","$$","$$$","$$$$"],"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "rating"):       return #"{"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "status"):       return #"{"options":["want_to_try","visited"],"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "last_visited"): return #"{"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "hours"):        return #"{"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "menu_url"):     return #"{"applicable_kinds":["restaurant"]}"#
+                case ("vendors", "web_enriched_at"): return #"{"applicable_kinds":["restaurant"],"hidden":true}"#
+                case ("vendors", "place_id"):     return #"{"hidden":true}"#
                 default:                        return "{}"
                 }
             }()
@@ -274,6 +299,30 @@ enum Seed {
         try Schema.seedHondaCatalogRows(db)
         // Same logic for the GMC catalog (v32). Idempotent.
         try Schema.seedGMCCatalogRows(db)
+
+        // Restaurants is a saved view over `vendors` with kind pinned to
+        // "restaurant" (v41). Same shape the v41 migration writes for
+        // existing workspaces. Idempotent via the row's stable id.
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO views (
+                    id, database_id, workspace_id, name, plural_name,
+                    type, query_json, presentation_json,
+                    icon, accent, area_id, sort_index,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                "view-restaurants", "vendors", workspaceID,
+                "Restaurants", "Restaurants",
+                "table",
+                #"{"kind":["restaurant"]}"#,
+                #"{"lookupProvider":"restaurant"}"#,
+                "Re", "iris", "area-collections", 8.3,
+                now, now
+            ]
+        )
     }
 
 }

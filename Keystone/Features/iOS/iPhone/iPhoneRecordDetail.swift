@@ -33,7 +33,7 @@ struct iPhoneRecordDetail: View {
             .padding(.bottom, 32)
         }
         .background(KstColor.paper0)
-        .navigationTitle(dbRow?.name ?? "")
+        .navigationTitle(store.currentView?.name ?? dbRow?.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -137,7 +137,15 @@ struct iPhoneRecordDetail: View {
 
     @ViewBuilder
     private var propertiesCard: some View {
-        let visible = properties.filter { $0.type != .title && $0.type != .relation }
+        let visible = properties.filter {
+            $0.type != .title
+                && $0.type != .relation
+                && !$0.config.isHidden
+                // `notes` is rendered by the block editor below the
+                // property card; hiding it here keeps the same kind
+                // of text from appearing in two places.
+                && $0.key != "notes"
+        }
         if !visible.isEmpty, let rec = record {
             iOSCardList {
                 ForEach(visible) { prop in
@@ -146,21 +154,49 @@ struct iPhoneRecordDetail: View {
                             .font(.kstText(size: 14))
                             .foregroundStyle(KstColor.ink2)
                             .frame(width: 100, alignment: .leading)
-                        PropertyValueField(
-                            property: prop,
-                            value: Binding(
-                                get: { drafts[prop.key] ?? rec.values[prop.key] ?? "" },
-                                set: { drafts[prop.key] = $0 }
-                            ),
-                            onCommit: { commit(prop.key) }
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if isRestaurantHours(prop, record: rec) {
+                            iPhoneHoursValueCell(
+                                rawValue: drafts[prop.key] ?? rec.values[prop.key] ?? "",
+                                draft: Binding(
+                                    get: { drafts[prop.key] ?? rec.values[prop.key] ?? "" },
+                                    set: { drafts[prop.key] = $0 }
+                                ),
+                                property: prop,
+                                recordID: recordID,
+                                onCommit: { commit(prop.key) }
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            PropertyValueField(
+                                property: prop,
+                                value: Binding(
+                                    get: { drafts[prop.key] ?? rec.values[prop.key] ?? "" },
+                                    set: { drafts[prop.key] = $0 }
+                                ),
+                                onCommit: { commit(prop.key) },
+                                onAddOption: { option in
+                                    store.send(.addPropertyOption(propertyID: prop.id, option: option))
+                                },
+                                onDeleteOption: { option in
+                                    store.send(.removePropertyOption(propertyID: prop.id, option: option))
+                                }
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 13)
                 }
             }
         }
+    }
+
+    private func isRestaurantHours(_ prop: PropertyRow, record: RecordRow) -> Bool {
+        guard prop.key == "hours" else { return false }
+        let kind = record.values["kind"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return kind == "restaurant"
     }
 
     private func commit(_ key: String) {
