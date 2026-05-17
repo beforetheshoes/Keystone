@@ -144,10 +144,30 @@ extension DependencyValues {
     }
 }
 
-/// Touch every row in every CloudKit-synced table so the `afterUpdate`
-/// trigger sqlite-data installs creates `SyncMetadata` for any row that
-/// got into the user table without going through the trigger path. See
-/// the call site for the bug this works around.
+/// Touch rows in CloudKit-synced tables that **don't yet have a
+/// `sqlitedata_icloud_metadata` entry**, so sqlite-data's `afterUpdate`
+/// trigger creates one. This catches rows inserted via migration
+/// `INSERT OR IGNORE`s, which bypass the `afterInsert` trigger.
+///
+/// **Why the WHERE filter matters.** The original implementation
+/// touched every row on every launch on the theory that the trigger's
+/// `SyncMetadata.insert(... onConflictDoUpdate: {})` was a true no-op
+/// for rows that already had metadata. Reading sqlite-data's actual
+/// trigger (`Triggers.swift:afterUpdate`) shows the trigger also runs
+/// `SyncMetadata.update(...)` which unconditionally bumps
+/// `userModificationTime = currentTime()`. That metadata-row change
+/// fires `SyncMetadata.afterUpdateTrigger`, which calls
+/// `syncEngine.$didUpdate(...)` — re-queuing the row for push to
+/// CloudKit. On a workspace with hundreds of vehicle-maintenance
+/// `property_values` rows this meant every launch flooded the engine's
+/// outbox; CloudKit responded with `Service Unavailable` / 429 throttles
+/// in the 30-second range and the queue never drained, so other devices
+/// saw no new data.
+///
+/// The `WHERE id NOT IN (… sqlitedata_icloud_metadata …)` filter makes
+/// the touch surgical: only rows that genuinely bypassed the insert
+/// trigger get touched. After they pick up metadata once, subsequent
+/// launches no-op.
 private func seedSyncMetadataForExistingRows(writer: any DatabaseWriter) throws {
     // Each entry is (table, "no-op-set-clause"). Tables without an
     // `updated_at` column reuse a stable column to make the UPDATE a
@@ -167,14 +187,34 @@ private func seedSyncMetadataForExistingRows(writer: any DatabaseWriter) throws 
         ("assets",          "SET updated_at = updated_at"),
     ]
 
+    var totalTouched = 0
     try writer.write { db in
         for (table, setClause) in touches {
             do {
-                try db.execute(sql: "UPDATE \(table) \(setClause)")
+                // Column names in `sqlitedata_icloud_metadata` are
+                // camelCase (`recordPrimaryKey`, `recordType`) — they're
+                // CREATE'd with double quotes in sqlite-data's
+                // metadatabase migration, so the literal name is what
+                // matters, not the snake_case convention used elsewhere
+                // in this DB. Quote them defensively.
+                try db.execute(
+                    sql: """
+                        UPDATE \(table) \(setClause)
+                        WHERE id NOT IN (
+                            SELECT "recordPrimaryKey"
+                            FROM sqlitedata_icloud_metadata
+                            WHERE "recordType" = ?
+                        )
+                    """,
+                    arguments: [table]
+                )
+                totalTouched += db.changesCount
             } catch {
                 bootstrapLog.error("seedSyncMetadata: UPDATE \(table) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
-    bootstrapLog.notice("seedSyncMetadataForExistingRows: completed touch on \(touches.count) tables")
+    bootstrapLog.notice(
+        "seedSyncMetadataForExistingRows: touched \(totalTouched, privacy: .public) row(s) lacking SyncMetadata across \(touches.count) table(s)"
+    )
 }
