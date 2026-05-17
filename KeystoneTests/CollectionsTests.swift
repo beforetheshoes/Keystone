@@ -15,21 +15,25 @@ final class CollectionsTests: XCTestCase {
         try withDB {
             let dbClient = DatabaseClient.liveValue
             let dbs = try dbClient.databases()
-            for id in ["books", "movies", "tv_shows", "restaurants"] {
+            // Restaurants is no longer a database — it's a view over
+            // `vendors` (v41). The three real Collections databases
+            // remain.
+            for id in ["books", "movies", "tv_shows"] {
                 XCTAssertTrue(dbs.contains { $0.id == id }, "missing seeded database: \(id)")
                 XCTAssertEqual(dbs.first { $0.id == id }?.areaID, "area-collections")
             }
+            XCTAssertFalse(dbs.contains { $0.id == "restaurants" },
+                           "restaurants should no longer be a database post-v41")
         }
     }
 
-    func testGalleryDefaultForMediaTableForRestaurants() throws {
+    func testGalleryDefaultForMedia() throws {
         try withDB {
             let dbClient = DatabaseClient.liveValue
             let dbs = try dbClient.databases()
             XCTAssertEqual(dbs.first { $0.id == "books" }?.defaultView, .gallery)
             XCTAssertEqual(dbs.first { $0.id == "movies" }?.defaultView, .gallery)
             XCTAssertEqual(dbs.first { $0.id == "tv_shows" }?.defaultView, .gallery)
-            XCTAssertEqual(dbs.first { $0.id == "restaurants" }?.defaultView, .table)
         }
     }
 
@@ -55,20 +59,6 @@ final class CollectionsTests: XCTestCase {
         }
     }
 
-    func testRestaurantsRelationToVendors() throws {
-        try withDB {
-            let dbClient = DatabaseClient.liveValue
-            let restaurantsProps = try dbClient.properties("restaurants")
-            let vendorProp = restaurantsProps.first { $0.key == "vendor" }
-            XCTAssertNotNil(vendorProp)
-            XCTAssertEqual(vendorProp?.type, .relation)
-            // Pull config_json out and assert the targetDatabaseID.
-            let extras = vendorProp?.config.rawExtrasJSON ?? "{}"
-            XCTAssertTrue(extras.contains("\"targetDatabaseID\":\"vendors\""),
-                          "restaurants.vendor must point at vendors; got \(extras)")
-        }
-    }
-
     // MARK: - Select options round-trip
 
     func testStatusOptionsRoundTrip() throws {
@@ -78,8 +68,9 @@ final class CollectionsTests: XCTestCase {
             let status = try XCTUnwrap(booksProps.first { $0.key == "status" })
             XCTAssertEqual(status.config.options, ["to_read", "reading", "read", "abandoned"])
 
-            let restaurantProps = try dbClient.properties("restaurants")
-            let priceProp = try XCTUnwrap(restaurantProps.first { $0.key == "price_range" })
+            // Restaurant-specific options now live on `vendors` (v41).
+            let vendorProps = try dbClient.properties("vendors")
+            let priceProp = try XCTUnwrap(vendorProps.first { $0.key == "price_range" })
             XCTAssertEqual(priceProp.config.options, ["$", "$$", "$$$", "$$$$"])
         }
     }
@@ -87,8 +78,9 @@ final class CollectionsTests: XCTestCase {
     func testFreeFormSelectHasNoOptions() throws {
         try withDB {
             let dbClient = DatabaseClient.liveValue
-            let restaurantProps = try dbClient.properties("restaurants")
-            let cuisine = try XCTUnwrap(restaurantProps.first { $0.key == "cuisine" })
+            // Cuisine ships free-form for now (vendors.cuisine, post-v41).
+            let vendorProps = try dbClient.properties("vendors")
+            let cuisine = try XCTUnwrap(vendorProps.first { $0.key == "cuisine" })
             XCTAssertNil(cuisine.config.options,
                          "cuisine ships free-form for now; users fill organically")
         }

@@ -131,12 +131,20 @@ struct TMDBMovieDetail: Decodable {
     let releaseDate: String?
     let runtime: Int?
     let posterPath: String?
+    let genres: [TMDBGenre]?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, overview, runtime
+        case id, title, overview, runtime, genres
         case releaseDate = "release_date"
         case posterPath = "poster_path"
     }
+}
+
+/// Genre row from TMDB's `genres: [{id, name}]` shape. We only keep
+/// the name — the numeric id isn't useful in our schema.
+struct TMDBGenre: Decodable {
+    let id: Int
+    let name: String
 }
 
 struct TMDBTVSearch: Decodable {
@@ -165,9 +173,10 @@ struct TMDBTVDetail: Decodable {
     let numberOfEpisodes: Int?
     let numberOfSeasons: Int?
     let posterPath: String?
+    let genres: [TMDBGenre]?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, overview
+        case id, name, overview, genres
         case firstAirDate = "first_air_date"
         case numberOfEpisodes = "number_of_episodes"
         case numberOfSeasons = "number_of_seasons"

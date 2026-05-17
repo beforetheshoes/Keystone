@@ -29,12 +29,7 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
 
         let response: GBVolumesResponse
         do {
-            let (data, urlResponse) = try await URLSession.shared.data(from: url)
-            if let http = urlResponse as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                log.error("books search status \(http.statusCode)")
-                return []
-            }
-            response = try JSONDecoder().decode(GBVolumesResponse.self, from: data)
+            response = try await GoogleBooksHTTP.fetchWithRetry(url: url)
         } catch {
             log.error("books search \(error.localizedDescription, privacy: .public)")
             return []
@@ -79,12 +74,10 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
 
         let response: GBVolumesResponse
         do {
-            let (data, urlResponse) = try await URLSession.shared.data(from: url)
-            if let http = urlResponse as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                log.error("books search status \(http.statusCode)")
-                return .unavailable(reason: "HTTP \(http.statusCode)")
-            }
-            response = try JSONDecoder().decode(GBVolumesResponse.self, from: data)
+            response = try await GoogleBooksHTTP.fetchWithRetry(url: url)
+        } catch GoogleBooksHTTP.HTTPError.status(let code) {
+            log.error("books search status \(code)")
+            return .unavailable(reason: "HTTP \(code)")
         } catch {
             log.error("books search \(error.localizedDescription, privacy: .public)")
             return .notFound
@@ -132,6 +125,17 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
             // record's author was blank, plug it in.
             updates["author"] = authors.joined(separator: ", ")
         }
+        if let desc = info.description, !desc.isEmpty {
+            updates["description"] = desc
+        }
+        if let cats = info.categories, !cats.isEmpty {
+            // Google Books categories are slash-delimited paths like
+            // "Fiction / Mystery & Detective / Cozy". Flatten the leaf
+            // segments into a single de-duped multiSelect set.
+            let flat = cats.flatMap { $0.split(separator: "/").map { $0.trimmingCharacters(in: .whitespaces) } }
+            let encoded = MultiSelectValue.encode(flat)
+            if !encoded.isEmpty { updates["tags"] = encoded }
+        }
 
         let coverURL: URL? = {
             let links = info.imageLinks
@@ -147,6 +151,56 @@ struct GoogleBooksProvider: EnrichmentProvider, LookupProvider {
             coverImageURL: coverURL,
             previewLabel: preview
         )
+    }
+}
+
+// MARK: - HTTP helper
+
+/// Shared retry-on-429/503 fetcher for Google Books calls. Lives in
+/// this file because the response shape is private — both the full
+/// `GoogleBooksProvider` (enrichment + lookup-creation search) and
+/// the `GoogleBooksCoverProvider` (cover-only picker) go through here
+/// so a quota event in one path doesn't blow the same call in another.
+enum GoogleBooksHTTP {
+    enum HTTPError: Error {
+        case status(Int)
+    }
+
+    /// 3 attempts with exponential backoff (200ms → 400ms → 800ms) on
+    /// 429 / 503. Anything else throws immediately. The retries are
+    /// per-call so a momentary quota burst (e.g. background enrichment
+    /// hammering the API) doesn't make every interactive search fail.
+    static func fetchWithRetry<T: Decodable>(url: URL) async throws -> T {
+        var delayMs: UInt64 = 200
+        var lastError: Error?
+        for attempt in 0..<3 {
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse {
+                    if (200..<300).contains(http.statusCode) {
+                        return try JSONDecoder().decode(T.self, from: data)
+                    }
+                    if http.statusCode == 429 || http.statusCode == 503 {
+                        lastError = HTTPError.status(http.statusCode)
+                        if attempt < 2 {
+                            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                            delayMs *= 2
+                            continue
+                        }
+                    }
+                    throw HTTPError.status(http.statusCode)
+                }
+                throw URLError(.badServerResponse)
+            } catch {
+                lastError = error
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                    delayMs *= 2
+                    continue
+                }
+            }
+        }
+        throw lastError ?? URLError(.unknown)
     }
 }
 
@@ -199,6 +253,8 @@ private struct GBVolumeInfo: Decodable {
     let pageCount: Int?
     let industryIdentifiers: [GBIndustryIdentifier]?
     let imageLinks: GBImageLinks?
+    let description: String?
+    let categories: [String]?
 }
 
 private struct GBIndustryIdentifier: Decodable {

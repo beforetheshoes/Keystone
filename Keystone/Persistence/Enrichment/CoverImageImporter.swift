@@ -14,20 +14,36 @@ enum CoverImageImporter {
     static func attachAsCover(_ url: URL, to recordID: String) async {
         @Dependency(\.defaultDatabase) var database
 
-        // Download to a temp file. URLSession works fine off the main actor.
-        let tempURL: URL
+        // Download into memory, re-encode to a normalized 800-px HEIC
+        // before writing to a temp file. The re-encode keeps disk usage
+        // bounded (saves ~70% per cover) and ensures every cover decodes
+        // through the same fast path. Falls back to the raw bytes when
+        // re-encoding isn't possible (unsupported source format or HEIC
+        // not available on the device).
+        let payload: (data: Data, ext: String)
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 log.error("cover download \(url.absoluteString, privacy: .public): status \(http.statusCode)")
                 return
             }
-            let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-            tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("kst-cover-\(UUID().uuidString).\(ext)")
-            try data.write(to: tempURL)
+            if let encoded = CoverImageReencoder.reencode(data) {
+                payload = (encoded.data, encoded.fileExtension)
+            } else {
+                let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
+                payload = (data, ext)
+            }
         } catch {
             log.error("cover download \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kst-cover-\(UUID().uuidString).\(payload.ext)")
+        do {
+            try payload.data.write(to: tempURL)
+        } catch {
+            log.error("cover tempwrite \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
         }
         defer { try? FileManager.default.removeItem(at: tempURL) }

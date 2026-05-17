@@ -144,10 +144,17 @@ enum LookupRegistry {
                 return MapKitVendorProvider()
             }
             return nil
-        // Restaurants are intentionally absent here — their schema
-        // delegates address/phone/etc to a linked vendor record, so a
-        // restaurant lookup-first flow would need to create both rows
-        // and wire the relation. Out of scope for the first cut.
+        case "restaurant":
+            // Restaurants view's "+ New" flow. The Restaurants view
+            // pins `kind = "restaurant"` and names this provider via
+            // its `presentation_json.lookupProvider`; the same Vendors
+            // database is the backing store for both this view and the
+            // generic Vendors database — they just use different
+            // candidate sources.
+            if #available(iOS 26.0, macOS 26.0, *) {
+                return MapKitRestaurantProvider()
+            }
+            return nil
         #endif
         default:
             return nil

@@ -75,6 +75,10 @@ struct TMDBTVProvider: EnrichmentProvider, LookupProvider {
         if let episodes = detail?.numberOfEpisodes, episodes > 0 {
             updates["episode_count"] = String(episodes)
         }
+        if let genres = detail?.genres, !genres.isEmpty {
+            let encoded = MultiSelectValue.encode(genres.map(\.name))
+            if !encoded.isEmpty { updates["tags"] = encoded }
+        }
         let posterURL: URL? = (detail?.posterPath ?? hit.posterPath).flatMap { path in
             let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
             return TMDBClient.posterBaseURL.appendingPathComponent(trimmed)

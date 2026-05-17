@@ -1,6 +1,13 @@
 import Foundation
-import CoreServices
 import OSLog
+
+// FSEventStream is a macOS-only API surface inside CoreServices —
+// the symbols (`FSEventStreamCreate`, `kFSEventStreamCreateFlagFileEvents`,
+// etc.) aren't exposed on iOS even though the framework imports.
+// The Cars/ sidecar watcher is a desktop-only feature; iOS gets a
+// no-op stub below so call sites compile without conditional gates.
+#if os(macOS)
+import CoreServices
 
 private let watcherLog = Logger(subsystem: "Keystone", category: "CarsWatcher")
 
@@ -196,3 +203,18 @@ final class CarsWatcher: @unchecked Sendable {
         }
     }
 }
+
+#else
+
+/// iOS no-op stub. iOS doesn't ship `FSEventStream`, and the
+/// `<workspace>/Cars/` sidecar surface is a Mac-only authoring
+/// workflow today. Keeping a callable shape so call sites in shared
+/// reducers compile without a conditional gate at every use.
+final class CarsWatcher: @unchecked Sendable {
+    static let shared = CarsWatcher()
+    private init() {}
+    func start() {}
+    func stop() {}
+}
+
+#endif

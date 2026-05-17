@@ -78,6 +78,10 @@ struct TMDBMovieProvider: EnrichmentProvider, LookupProvider {
         if let runtime = detail?.runtime, runtime > 0 {
             updates["runtime_minutes"] = String(runtime)
         }
+        if let genres = detail?.genres, !genres.isEmpty {
+            let encoded = MultiSelectValue.encode(genres.map(\.name))
+            if !encoded.isEmpty { updates["tags"] = encoded }
+        }
         let posterURL: URL? = (detail?.posterPath ?? hit.posterPath).flatMap { path in
             // path comes prefixed with `/`. URLComponents balks at a path
             // appended that starts with `/`; trim it.

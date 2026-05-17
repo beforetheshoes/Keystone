@@ -36,6 +36,11 @@ actor EnrichmentService {
             providers.append(MapKitVendorProvider())
         }
         #endif
+        // Restaurants: website-scrape pass for logo, hours, rating,
+        // price band, and menu URL. Runs after the MapKit vendor pass
+        // so `website` is already populated for restaurants created
+        // via the lookup sheet.
+        providers.append(RestaurantWebsiteEnrichmentProvider())
         providers.append(GoogleBooksProvider())
         providers.append(TMDBMovieProvider())
         providers.append(TMDBTVProvider())
@@ -91,6 +96,62 @@ actor EnrichmentService {
         inFlight = nil
     }
 
+    /// Run every applicable provider against a single record in
+    /// overwrite mode, bypassing both the in-flight coalescing gate
+    /// and the trigger-property "already enriched" check.
+    ///
+    /// The "Re-enrich…" UI gesture lands here: the user is explicitly
+    /// asking for fresh data on one record, so we don't want them to
+    /// be silently no-op'd when a background pass happens to be in
+    /// flight, and we don't want providers to skip the record just
+    /// because its trigger marker is still set from the previous run.
+    /// Provider-owned columns get rewritten; columns the providers
+    /// don't return (notes, status, …) stay put.
+    func enrichSingleRecord(recordID: String, databaseID: String) async {
+        @Dependency(\.defaultDatabase) var database
+        let snapshot: EnrichmentRecord
+        do {
+            snapshot = try await database.read { db in
+                let row = try Row.fetchOne(db, sql: """
+                    SELECT id, title, database_id FROM records WHERE id = ?
+                """, arguments: [recordID])
+                let title = (row?["title"] as String?) ?? ""
+                let actualDB = (row?["database_id"] as String?) ?? databaseID
+                let valueRows = try Row.fetchAll(db, sql: """
+                    SELECT p.key AS key, pv.text_value AS t, pv.number_value AS n, pv.date_value AS d
+                    FROM property_values pv
+                    JOIN properties p ON p.id = pv.property_id
+                    WHERE pv.record_id = ?
+                """, arguments: [recordID])
+                var values: [String: String] = [:]
+                for row in valueRows {
+                    let key: String = row["key"]
+                    if let t: String = row["t"], !t.isEmpty {
+                        values[key] = t
+                    } else if let n: Double = row["n"] {
+                        values[key] = (n.rounded() == n) ? String(Int(n)) : String(n)
+                    } else if let d: String = row["d"], !d.isEmpty {
+                        values[key] = d
+                    }
+                }
+                return EnrichmentRecord(id: recordID, databaseID: actualDB, title: title, propertyValues: values)
+            }
+        } catch {
+            log.error("enrichSingleRecord fetch failed for \(recordID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        for provider in Self.registry where provider.databaseKey == snapshot.databaseID {
+            guard await provider.isAvailable() else { continue }
+            switch await provider.enrich(record: snapshot) {
+            case .resolved(let apply):
+                await applyEnrichment(apply, to: snapshot, overwrite: true)
+            case .ambiguous, .notFound, .unavailable:
+                continue
+            }
+        }
+    }
+
     private func runPass(onlyDatabase: String?) async {
         let providers: [any EnrichmentProvider]
         if let onlyDatabase {
@@ -130,8 +191,19 @@ actor EnrichmentService {
         log.info("\(provider.databaseKey, privacy: .public): \(pending.count) record(s) to enrich")
 
         var resolved = 0, ambiguous = 0, notFound = 0, unavailable = 0
-        for rec in pending {
+        for (idx, rec) in pending.enumerated() {
             if Task.isCancelled { break }
+            // Small inter-request delay so a 200+ row batch (e.g.
+            // after a CSV import) doesn't burn the provider's rate
+            // budget in one tight loop. Google Books and TMDB both
+            // start returning 429 / 503 under sustained load; pacing
+            // here keeps the interactive cover picker and other
+            // user-driven flows usable while a background pass runs.
+            // First iteration is unthrottled — no point sleeping
+            // before the very first request.
+            if idx > 0 {
+                try? await Task.sleep(nanoseconds: 250 * 1_000_000)
+            }
             switch await provider.enrich(record: rec) {
             case .resolved(let apply):
                 await applyEnrichment(apply, to: rec)
