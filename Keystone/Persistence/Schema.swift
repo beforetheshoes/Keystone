@@ -2688,6 +2688,86 @@ enum Schema {
     /// `property_values.property_id` references (`vendors.cuisine` →
     /// would otherwise need a property-id rename + relink pass).
     /// Users see "Tags"; the on-disk identifier is unchanged.
+    /// v49 — switch the books-enrichment trigger from `isbn` to a
+    /// dedicated `book_enriched_at` marker, mirroring how restaurants
+    /// already work (`web_enriched_at`).
+    ///
+    /// The old trigger assumed Google Books was the only writer for
+    /// books: "ISBN is empty ⇒ provider hasn't run yet." That breaks
+    /// the moment any other path populates a book (CSV import,
+    /// Goodreads export, sidecar frontmatter, manual entry). Those
+    /// records end up with author / publisher / description / cover
+    /// but no `isbn`, so every enrichment pass re-picks them, hits
+    /// Google's daily quota, and 429-floods the log.
+    ///
+    /// The fix:
+    /// - Add `book_enriched_at` (hidden date) to the `books` database.
+    /// - `GoogleBooksProvider.apply` writes it on every resolve.
+    /// - `GoogleBooksProvider.triggerPropertyKey` now reads it.
+    /// - **Backfill** for records that look already-enriched: any
+    ///   book with `author` AND at least one of `description`,
+    ///   `publisher`, `page_count` gets stamped with its
+    ///   `updated_at`. That excludes 92 imported-from-CSV records
+    ///   from the next pass, immediately stopping the quota loop.
+    ///
+    /// The `isbn` property itself is unchanged — users who want ISBNs
+    /// on these records can still get them via right-click "Re-enrich"
+    /// (which bypasses the trigger), or a future CSV-aware import.
+    static func addBookEnrichedAtV49(_ db: Database) throws {
+        let now = AppDatabase.isoFormatter.string(from: Date())
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO properties
+                    (id, database_id, key, name, type, config_json, is_required, is_archived, created_at, updated_at, sort_index)
+                VALUES (?, 'books', 'book_enriched_at', 'Enriched', 'date',
+                        '{"hidden":true}', 0, 0, ?, ?, 100)
+            """,
+            arguments: ["books.book_enriched_at", now, now]
+        )
+
+        // Backfill marker for records that have rich metadata already.
+        // Insert into property_values directly (not via the wrapper)
+        // because this is a migration; we want exactly-once seeded rows
+        // with stable deterministic ids so re-running the migration
+        // never duplicates.
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO property_values
+                    (id, record_id, property_id, text_value, created_at, updated_at)
+                SELECT
+                    r.id || '.book_enriched_at',
+                    r.id,
+                    'books.book_enriched_at',
+                    r.updated_at,
+                    r.updated_at,
+                    r.updated_at
+                FROM records r
+                WHERE r.database_id = 'books'
+                  AND r.deleted_at IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM property_values pv
+                    WHERE pv.record_id = r.id
+                      AND pv.property_id = 'books.author'
+                      AND pv.text_value IS NOT NULL
+                      AND pv.text_value != ''
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM property_values pv
+                    WHERE pv.record_id = r.id
+                      AND pv.property_id IN (
+                        'books.description',
+                        'books.publisher',
+                        'books.page_count'
+                      )
+                      AND (
+                        pv.text_value IS NOT NULL AND pv.text_value != ''
+                        OR pv.number_value IS NOT NULL
+                      )
+                  )
+            """
+        )
+    }
+
     static func renameCuisineToTagsV48(_ db: Database) throws {
         let now = AppDatabase.isoFormatter.string(from: Date())
         try db.execute(

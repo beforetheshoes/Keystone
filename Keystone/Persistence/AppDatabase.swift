@@ -381,6 +381,9 @@ enum AppDatabase {
         migrator.registerMigration("v48-cuisine-to-tags") { db in
             try Schema.renameCuisineToTagsV48(db)
         }
+        migrator.registerMigration("v49-book-enriched-at") { db in
+            try Schema.addBookEnrichedAtV49(db)
+        }
 
         try? writer.read { db in logDBCensus(db, label: "before-migrate") }
         bootLog.notice("workspace path: \(folder.path, privacy: .public)")
