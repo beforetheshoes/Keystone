@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Seam for delivering next-due alerts to an external system. The
 /// concrete EventKit / Apple Reminders integration lands in a
@@ -42,5 +43,9 @@ public struct NoOpMaintenanceReminderSink: MaintenanceReminderSink {
 /// Holder used by the engine + view layer to look up the active sink.
 /// Replace `current` once a real Apple Reminders integration ships.
 public enum MaintenanceReminders {
-    nonisolated(unsafe) public static var current: any MaintenanceReminderSink = NoOpMaintenanceReminderSink()
+    private static let _current = OSAllocatedUnfairLock<any MaintenanceReminderSink>(initialState: NoOpMaintenanceReminderSink())
+    public static var current: any MaintenanceReminderSink {
+        get { _current.withLock { $0 } }
+        set { _current.withLock { $0 = newValue } }
+    }
 }

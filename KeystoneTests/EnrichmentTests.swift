@@ -1,5 +1,6 @@
 import XCTest
 import Dependencies
+import Synchronization
 @testable import Keystone
 
 final class EnrichmentTests: XCTestCase {
@@ -157,14 +158,20 @@ final class EnrichmentTests: XCTestCase {
 
 /// Test double for `EnrichmentProvider`. Tracks call counts and the last
 /// record it saw so tests can assert which records the service handed off.
-final class SpyProvider: EnrichmentProvider, @unchecked Sendable {
+final class SpyProvider: EnrichmentProvider, Sendable {
     let databaseKey: String
     let triggerPropertyKey: String
     private let available: Bool
     private let response: EnrichmentResult
 
-    private(set) var enrichCount: Int = 0
-    private(set) var lastRecord: EnrichmentRecord?
+    private let counters = Mutex<Counters>(Counters())
+    var enrichCount: Int { counters.withLock { $0.enrichCount } }
+    var lastRecord: EnrichmentRecord? { counters.withLock { $0.lastRecord } }
+
+    private struct Counters {
+        var enrichCount: Int = 0
+        var lastRecord: EnrichmentRecord?
+    }
 
     init(
         databaseKey: String,
@@ -181,8 +188,10 @@ final class SpyProvider: EnrichmentProvider, @unchecked Sendable {
     func isAvailable() async -> Bool { available }
 
     func enrich(record: EnrichmentRecord) async -> EnrichmentResult {
-        enrichCount += 1
-        lastRecord = record
+        counters.withLock { c in
+            c.enrichCount += 1
+            c.lastRecord = record
+        }
         return response
     }
 }

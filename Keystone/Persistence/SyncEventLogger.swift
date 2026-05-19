@@ -184,13 +184,7 @@ enum SyncEventLogger {
         var lastErrorDetails: String?
     }
 
-    nonisolated(unsafe) private static let iso: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     private static func iso8601String(_ date: Date) -> String {
-        iso.string(from: date)
+        AppDatabase.isoFormatter.string(from: date)
     }
 }

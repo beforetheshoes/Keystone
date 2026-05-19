@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Security
+import Synchronization
 import Dependencies
 import DependenciesMacros
 
@@ -281,29 +282,26 @@ struct SecItemProtectionKeyStore: ProtectionKeyStore {
     }
 }
 
-/// In-memory store used by tests + the testValue dependency. Atomic via
-/// NSLock so a write from one async task can't race a read from another.
-final class InMemoryProtectionKeyStore: ProtectionKeyStore, @unchecked Sendable {
-    private var items: [String: Data] = [:]
-    private let lock = NSLock()
+/// In-memory store used by tests + the testValue dependency. All
+/// mutable state lives inside a `Mutex`, so the compiler synthesizes
+/// `Sendable` conformance automatically — no `@unchecked` escape.
+final class InMemoryProtectionKeyStore: ProtectionKeyStore {
+    private let items = Mutex<[String: Data]>([:])
 
-    private func key(service: String, account: String) -> String {
+    private nonisolated static func key(service: String, account: String) -> String {
         "\(service)|\(account)"
     }
 
     func read(service: String, account: String) throws -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        return items[key(service: service, account: account)]
+        items.withLock { $0[Self.key(service: service, account: account)] }
     }
 
     func write(_ data: Data, service: String, account: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        items[key(service: service, account: account)] = data
+        items.withLock { $0[Self.key(service: service, account: account)] = data }
     }
 
     func delete(service: String, account: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        items[key(service: service, account: account)] = nil
+        items.withLock { $0[Self.key(service: service, account: account)] = nil }
     }
 }
 

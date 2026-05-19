@@ -34,8 +34,11 @@ struct BlockListView: View {
         .onChange(of: store.focusedBlockID) { _, new in
             if let new {
                 focusedBlock = new
-                // Clear the sentinel so future updates are detected
-                DispatchQueue.main.async {
+                // Clear the sentinel so future updates are detected.
+                // Defer to the next runloop tick so SwiftUI has time to
+                // commit the focusedBlock state before the store action
+                // races against it.
+                Task { @MainActor in
                     store.send(.clearFocusRequest)
                 }
             }

@@ -20,15 +20,17 @@ import Quartz
 ///
 /// `QLPreviewItem` requires NSURL not URL, so the items are bridged
 /// at access time.
-/// Marked `nonisolated` because the QuickLook protocols
-/// (`QLPreviewPanelDataSource`, `QLPreviewPanelDelegate`) are imported
-/// from a Cocoa header without explicit main-actor annotations, and
-/// applying `@MainActor` to the class triggers Swift 6's "actor
-/// isolation crosses protocol boundary" diagnostic. We only ever touch
-/// `items` from the main thread anyway — the AppFeature reducer hops
-/// to `MainActor` before calling `present(urls:)` and the panel
-/// callbacks fire on main per `QLPreviewPanel`'s contract.
-final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate, @unchecked Sendable {
+///
+/// `@MainActor`-isolated: every `QLPreviewPanel` API we touch is
+/// main-actor; `present(urls:)` is only called from MainActor reducer
+/// effects; the QL protocol callbacks (`numberOfPreviewItems`,
+/// `previewPanel(_:previewItemAt:)`) fire on main per QL's documented
+/// contract. The QL protocols are imported as nonisolated — we satisfy
+/// them with `nonisolated` witnesses that hop to MainActor via
+/// `MainActor.assumeIsolated` (safe because QL only calls these on
+/// main). MainActor isolation makes the class `Sendable` for free.
+@MainActor
+final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     static let shared = QuickLookManager()
 
     private var items: [URL] = []
@@ -73,6 +75,9 @@ final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
         super.init()
     }
 
+    // `presentPlaceholder` is the only mutable cross-actor surface; on
+    // MainActor isolation it's safe by definition.
+
     /// Show the panel populated with `urls`. If the panel is already
     /// open, reload its content with the new URLs (no flicker, same
     /// window position).
@@ -83,13 +88,8 @@ final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     /// via `presentPlaceholder` instead of being handed to Quick Look,
     /// which would otherwise show an empty panel or fail silently.
     ///
-    /// `@MainActor` because every `QLPreviewPanel` API we touch
-    /// (`shared()`, `dataSource`, `delegate`, `reloadData`, `isVisible`,
-    /// `makeKeyAndOrderFront`) is main-actor isolated. The class itself
-    /// can't be `@MainActor` without breaking the QL protocols (their
-    /// callbacks are imported as `nonisolated`), so we annotate at the
-    /// method level and let the caller hop to main.
-    @MainActor
+    /// Class is `@MainActor`-isolated; this method runs on MainActor
+    /// naturally.
     func present(urls: [URL]) {
         var ready: [URL] = []
         for url in urls {
@@ -126,8 +126,9 @@ final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     /// Returns `.ok` only when the file exists, is readable, and
     /// has nonzero bytes. CloudKit-managed files in flight typically
     /// fail the size check (the placeholder file is created before
-    /// the bytes arrive).
-    static func preflight(_ url: URL) -> PreflightResult {
+    /// the bytes arrive). `nonisolated` so tests (and any non-MainActor
+    /// preflight callers) can use it without a MainActor hop.
+    nonisolated static func preflight(_ url: URL) -> PreflightResult {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return .missing(.notOnDisk) }
         let values = try? url.resourceValues(forKeys: [.isReadableKey, .fileSizeKey])
@@ -139,15 +140,22 @@ final class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     }
 
     // MARK: - QLPreviewPanelDataSource
+    //
+    // QL imports these methods as `nonisolated`. They're documented to
+    // be called from main, so `MainActor.assumeIsolated` makes the
+    // isolation contract explicit (it crashes if QL ever violates the
+    // documented contract — preferable to a silent data race).
 
-    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        items.count
+    nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        MainActor.assumeIsolated { items.count }
     }
 
-    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        // QLPreviewItem is an NS-style protocol that NSURL adopts;
-        // SwiftUI URL doesn't, so bridge.
-        items[index] as NSURL
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        MainActor.assumeIsolated {
+            // QLPreviewItem is an NS-style protocol that NSURL adopts;
+            // SwiftUI URL doesn't, so bridge.
+            items[index] as NSURL
+        }
     }
 }
 #endif

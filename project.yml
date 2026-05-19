@@ -10,8 +10,25 @@ options:
 
 settings:
   base:
-    SWIFT_VERSION: "6.0"
-    SWIFT_STRICT_CONCURRENCY: minimal
+    SWIFT_VERSION: "6"
+    SWIFT_STRICT_CONCURRENCY: complete
+    # `SWIFT_APPROACHABLE_CONCURRENCY=YES` is the umbrella flag — it
+    # auto-enables NonisolatedNonsendingByDefault (nonisolated async
+    # functions stay on the caller's actor) plus the other Swift 6.2
+    # approachability upcoming features (InferIsolatedConformances,
+    # InferSendableFromCaptures, DisableOutwardActorInference,
+    # GlobalActorIsolatedTypesUsability). Forces an explicit @concurrent
+    # at sites that need a real off-MainActor hop.
+    #
+    # NOTE: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` is NOT enabled
+    # because it triggers circular-reference errors in TCA's `@Reducer`
+    # macro expansion in Xcode 26 (swift-composable-architecture 1.23+).
+    # The macro generates body/Body type relationships that interact
+    # badly with default MainActor inference on the enclosing reducer
+    # struct. Revisit if/when TCA ships explicit isolation annotations
+    # in the macro expansion. The approachable-concurrency umbrella is
+    # the safe subset for a TCA codebase right now.
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
     DEVELOPMENT_TEAM: 777XX46HDU
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
@@ -184,18 +201,34 @@ targets:
       - package: swift-composable-architecture
         product: CasePaths
 
+  KeystoneUITests:
+    type: bundle.ui-testing
+    supportedDestinations: [macOS]
+    sources:
+      - path: KeystoneUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryanleewilliams.keystone.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        TEST_TARGET_NAME: Keystone
+    dependencies:
+      - target: Keystone
+
 schemes:
   Keystone:
     build:
       targets:
         Keystone: all
         KeystoneTests: [test]
+        KeystoneUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - KeystoneTests
+        - KeystoneUITests
     profile:
       config: Release
     analyze:

@@ -80,6 +80,14 @@ AuthKey_*.p8
 # Logs
 *.log
 
+# Instruments / profiling output. Traces routinely land in `.traces/`
+# (via `bin/profile-gallery.sh`) or at the repo root with the
+# `Launch_<App>_<timestamp>_<uuid>.trace` naming pattern that
+# Instruments.app uses. Both can be hundreds of MB and shouldn't be
+# checked in.
+.traces/
+Launch_*.trace/
+
 # Claude scratch (in case anything ever lands inside the repo)
 .claude/
 CLAUDE.local.md

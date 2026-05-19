@@ -39,7 +39,7 @@ struct DatabaseDetailView: View {
     /// to the currently-visible record set. Drives the inline
     /// "Enriching X of Y…" progress label.
     private var bulkEnrichingCount: Int {
-        let visible = Set(store.filteredRecords.map(\.id))
+        let visible = Set(store.derivedRecords.filteredSorted.map(\.id))
         return store.enrichingRecordIDs.intersection(visible).count
     }
 
@@ -57,29 +57,20 @@ struct DatabaseDetailView: View {
         let pinnedKind = store.currentView?.pinnedKind
         return store.currentProperties.filter { p in
             guard p.isVisible(forKind: pinnedKind) else { return false }
-            // When the active view pins a `kind` value (e.g. the
-            // Restaurants view pins kind=restaurant), every visible
-            // record shares that value — showing the column adds no
-            // information. The generic Vendors / plain-database
-            // routes keep the column.
             if pinnedKind != nil, p.key == "kind" { return false }
             return true
         }
     }
 
-    /// Records as they should appear in any view kind — pinned filters,
-    /// user-added filters, then the active sort. Gallery / list /
-    /// dashboard now honor all three (previously only table + calendar
-    /// did). Group bucketing happens inside each view since the bucket
-    /// list isn't shared.
+    /// Records as they should appear in any view kind — already
+    /// filtered + sorted by the off-MainActor `recomputeDerived` effect
+    /// in `AppFeature`. The previous in-view `FilterEngine.apply` +
+    /// `SortEngine.apply` per-body recompute was the proximate cause of
+    /// the 24-second `LazyStack.place(subviews:...)` cascade observed
+    /// during CloudKit sync; reading the pre-computed snapshot collapses
+    /// that to a pointer copy.
     private var displayedRecords: [RecordRow] {
-        let filtered = store.filteredRecords
-        return SortEngine.apply(
-            filtered,
-            key: store.sortKey,
-            ascending: store.sortAscending,
-            properties: visibleProperties
-        )
+        store.derivedRecords.filteredSorted
     }
 
     /// Count of protected records currently hidden anywhere in the
@@ -159,7 +150,7 @@ struct DatabaseDetailView: View {
                         Button("Re-enrich all visible…") {
                             store.send(.reenrichAllVisibleRecords)
                         }
-                        .disabled(store.filteredRecords.isEmpty)
+                        .disabled(store.derivedRecords.filteredSorted.isEmpty)
                         Divider()
                     }
                     Button("Delete all records…", role: .destructive) {
@@ -237,10 +228,6 @@ struct DatabaseDetailView: View {
             switch store.viewKind {
             case .table:    TableView(
                 db: db,
-                // Table-only: drop user-hidden columns before render.
-                // Other view kinds (gallery, list, dashboard) have
-                // their own intrinsic property selection rules and
-                // ignore the hidden set on purpose.
                 properties: visibleProperties.filter { !store.hiddenColumns.contains($0.key) },
                 records: displayedRecords,
                 groups: GroupEngine.group(displayedRecords, key: store.groupKey, properties: visibleProperties),

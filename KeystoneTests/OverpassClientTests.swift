@@ -1,4 +1,5 @@
 import XCTest
+import Synchronization
 @testable import Keystone
 
 final class OverpassClientTests: XCTestCase {
@@ -99,14 +100,15 @@ final class OverpassClientTests: XCTestCase {
 
 // MARK: - Stub
 
-final class StubOverpassHTTP: OverpassHTTP, @unchecked Sendable {
+final class StubOverpassHTTP: OverpassHTTP, Sendable {
     private let payload: String?
-    private(set) var callCount = 0
+    private let _callCount = Atomic<Int>(0)
+    var callCount: Int { _callCount.load(ordering: .relaxed) }
 
     init(_ payload: String?) { self.payload = payload }
 
     func post(query: String) async -> Data? {
-        callCount += 1
+        _callCount.wrappingAdd(1, ordering: .relaxed)
         return payload?.data(using: .utf8)
     }
 }

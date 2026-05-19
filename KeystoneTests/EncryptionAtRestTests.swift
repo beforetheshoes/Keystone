@@ -31,7 +31,7 @@ final class EncryptionAtRestTests: XCTestCase {
     /// per-record encryptors. Tests pre-#14 used a single workspace
     /// key; per-record keys are now mandatory so each test instance
     /// gets its own keychain stub and builds encryptors per recordID.
-    private final class TestKeysHandle: @unchecked Sendable {
+    private final class TestKeysHandle: Sendable {
         let keys: ProtectionKeyClient
         init() {
             self.keys = ProtectionKeyClient.makeClient(store: InMemoryProtectionKeyStore())

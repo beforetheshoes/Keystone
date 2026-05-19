@@ -4,7 +4,7 @@ import Foundation
 /// bucket label is rendered as a section header; `rows` are the records
 /// in that bucket in their input order (group preserves the caller's
 /// sort).
-struct RecordGroup: Equatable {
+struct RecordGroup: Equatable, Sendable {
     /// Display label for the section header. Empty / missing values land
     /// in `"—"`.
     let label: String

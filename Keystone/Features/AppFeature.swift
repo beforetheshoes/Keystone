@@ -11,6 +11,38 @@ import AppKit
 import UIKit
 #endif
 
+/// Snapshot of records as they should appear in any view kind, plus
+/// per-record meta content precomputed once per derivation. Written
+/// exactly once per *converged* input change by the `recomputeDerived`
+/// effect — `.derivedRecordsReady` is the only assignment site, and the
+/// effect is cancellable-in-flight so rapid CloudKit sync ticks collapse
+/// to one final assignment rather than one per tick.
+///
+/// **Why a separate struct, not computed properties?** With ~278 gallery
+/// cards observing State, every read of `state.filteredRecords` (a
+/// computed property) ran filter+sort on MainActor per view body
+/// evaluation; per-card `PropertyMetaContent.make(...)` ran on MainActor
+/// per render. CloudKit sync firing reducer actions during scroll caused
+/// the 24-second `LazyStack.place(subviews:...)` cascade observed in
+/// Time Profiler. Stashing the computed result here moves all of that
+/// work into a `.run` effect that executes on the cooperative pool —
+/// MainActor only writes the final snapshot once per change.
+struct DerivedRecords: Equatable, Sendable {
+    /// Records after `FilterEngine.apply` → `SortEngine.apply`, in
+    /// display order. Read by every view kind's row iteration.
+    var filteredSorted: [RecordRow] = []
+    /// Bucketed view of `filteredSorted`. Always non-empty (when
+    /// `groupKey == nil`, a single ungrouped bucket holds every row).
+    /// Read by the list/gallery group-aware iterations.
+    var groups: [RecordGroup] = [RecordGroup(label: "", key: "", rows: [])]
+    /// Per-record `PropertyMetaContent`, keyed by `RecordRow.id`. The
+    /// gallery card body reads this directly instead of calling
+    /// `PropertyMetaContent.make(record:properties:)` per render.
+    var metaByRecordID: [String: PropertyMetaContent] = [:]
+
+    static let empty = DerivedRecords()
+}
+
 @Reducer
 struct AppFeature {
     @ObservableState
@@ -33,6 +65,20 @@ struct AppFeature {
         var currentDB: DBRow?
         var currentProperties: [PropertyRow] = []
         var currentRecords: [RecordRow] = []
+        /// Records keyed by backing database id, last known per database.
+        /// Populated as the user navigates to each database; serves as
+        /// the "stale-while-revalidate" cache so a return visit shows
+        /// the previous record set instantly (no SQLite roundtrip on
+        /// the main scrollable view) while a background reload runs.
+        ///
+        /// Mirrored from `currentRecords` whenever the active database's
+        /// records change — see `.databaseLoaded`, `.updatePropertyValue`,
+        /// and other record-mutation paths in this reducer.
+        /// Same database id is used by both `.database(dbID)` and
+        /// `.view(viewID)` routes (the latter keys on `view.databaseID`),
+        /// since saved views are just filtered presentations of the
+        /// backing database — the cached raw rows are identical.
+        var recordsByDatabaseID: [String: [RecordRow]] = [:]
         var viewKind: ViewKind = .table
         var sortKey: String?
         var sortAscending: Bool = true
@@ -66,13 +112,12 @@ struct AppFeature {
         /// clean slate. Persistence to `views.config_json` is a future
         /// extension — these are session-only for now.
         var filters: [Filter] = []
-        /// Convenience: records after filtering. SwiftUI re-derives this
-        /// when `filters` or `currentRecords` change. Pinned filters
-        /// (from `currentView`) are combined with user-added filters
-        /// before evaluation.
-        var filteredRecords: [RecordRow] {
-            FilterEngine.apply(pinnedFilters + filters, to: currentRecords, properties: currentProperties)
-        }
+
+        /// Pre-computed records snapshot. Written by the
+        /// `recomputeDerived` effect — never by view-side computed
+        /// properties. Reads must come from here, not from a fresh
+        /// `FilterEngine.apply` call on every body evaluation.
+        var derivedRecords: DerivedRecords = .empty
 
         // Record detail state (reset on record change)
         var currentRecord: RecordRow?
@@ -334,6 +379,12 @@ struct AppFeature {
         /// hydration so the persisted filters don't clobber it.
         case navigateAndPresetTagFilter(databaseID: String, propertyKey: String, value: String)
         case databaseLoaded(db: DBRow?, properties: [PropertyRow], records: [RecordRow])
+        /// Final assignment site for `state.derivedRecords`. Fired by
+        /// the cancellable `recomputeDerived` effect after off-MainActor
+        /// filter+sort+group+meta computation. Cancellation drops
+        /// stale snapshots so only the converged result lands on
+        /// MainActor — one state write per real input change.
+        case derivedRecordsReady(DerivedRecords)
         case databaseContextLoaded(db: DBRow?, properties: [PropertyRow])
         case recordLoaded(record: RecordRow?, related: [RecordRow])
         case setViewKind(ViewKind)
@@ -550,6 +601,50 @@ struct AppFeature {
     private func isAlreadySynced(_ status: AppFeature.SyncStatus) -> Bool {
         if case .synced = status { return true }
         return false
+    }
+
+    /// Cancel-id namespace for cancellable effects.
+    private enum CancelID: Hashable {
+        /// Off-MainActor filter/sort/group/meta derivation effect.
+        /// `cancelInFlight: true` collapses rapid input ticks (e.g.
+        /// CloudKit sync firing `databaseLoaded` 5× in a burst) into a
+        /// single final `.derivedRecordsReady` assignment.
+        case recomputeDerived
+    }
+
+    /// Build the off-MainActor effect that filters, sorts, groups, and
+    /// pre-computes per-record meta content. Captures only `Sendable`
+    /// snapshots of the inputs — the actual work runs on the
+    /// cooperative pool, not on MainActor. Result lands via a single
+    /// `.derivedRecordsReady` action.
+    static func recomputeDerived(_ state: State) -> Effect<Action> {
+        let records = state.currentRecords
+        let properties = state.currentProperties
+        let filters = state.pinnedFilters + state.filters
+        let sortKey = state.sortKey
+        let sortAscending = state.sortAscending
+        let groupKey = state.groupKey
+        return .run { send in
+            let filtered = FilterEngine.apply(filters, to: records, properties: properties)
+            let sorted = SortEngine.apply(filtered, key: sortKey, ascending: sortAscending, properties: properties)
+            let groups: [RecordGroup]
+            if let groupKey {
+                groups = GroupEngine.group(sorted, key: groupKey, properties: properties)
+            } else {
+                groups = [RecordGroup(label: "", key: "", rows: sorted)]
+            }
+            var meta: [String: PropertyMetaContent] = [:]
+            meta.reserveCapacity(sorted.count)
+            for r in sorted {
+                meta[r.id] = PropertyMetaContent.make(record: r, properties: properties)
+            }
+            await send(.derivedRecordsReady(DerivedRecords(
+                filteredSorted: sorted,
+                groups: groups,
+                metaByRecordID: meta
+            )))
+        }
+        .cancellable(id: CancelID.recomputeDerived, cancelInFlight: true)
     }
 
     var body: some ReducerOf<Self> {
@@ -775,6 +870,18 @@ struct AppFeature {
                     state.currentRecord = nil
                     state.currentRecordRelated = []
                     state.currentBlocks = []
+                    // Stale-while-revalidate: render the cached record
+                    // set immediately so sidebar nav feels instant; the
+                    // .run effect below revalidates from SQLite and the
+                    // resulting .databaseLoaded replaces both
+                    // currentRecords and the cache entry. First-visit
+                    // case (no cache yet) keeps the empty state shown
+                    // until the load completes — same as before.
+                    if let cached = state.recordsByDatabaseID[dbID] {
+                        state.currentRecords = cached
+                    } else {
+                        state.currentRecords = []
+                    }
                     let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let db = try? dbClient.database(dbID)
@@ -791,6 +898,11 @@ struct AppFeature {
                     state.currentRecord = nil
                     state.currentRecordRelated = []
                     state.currentBlocks = []
+                    if let cached = state.recordsByDatabaseID[dbID] {
+                        state.currentRecords = cached
+                    } else {
+                        state.currentRecords = []
+                    }
                     let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let db = try? dbClient.database(dbID)
@@ -823,6 +935,14 @@ struct AppFeature {
                     }
                     let backing = view.databaseID
                     let prefsKey = viewID                 // saved-view keyed prefs
+                    // Stale-while-revalidate: saved views read the same
+                    // raw record set as their backing database. Cache
+                    // hit ⇒ paint instantly; reload diffs in fresh data.
+                    if let cached = state.recordsByDatabaseID[backing] {
+                        state.currentRecords = cached
+                    } else {
+                        state.currentRecords = []
+                    }
                     let hidden = state.hiddenRecordIDs
                     return .run { send in
                         let db = try? dbClient.database(backing)
@@ -878,9 +998,24 @@ struct AppFeature {
                 }
 
             case let .databaseLoaded(db, props, records):
+                // CloudKit sync re-emits identical record sets routinely
+                // (e.g. on every `.synced` poll). When the incoming
+                // payload is value-equal to what we already have, skip
+                // both the state write *and* the recompute — the
+                // willSet observation that drives 278 gallery cards
+                // would otherwise fire every tick during scroll.
+                let noop = (records == state.currentRecords)
+                    && (props == state.currentProperties)
+                    && (db == state.currentDB)
                 state.currentDB = db
                 state.currentProperties = props
                 state.currentRecords = records
+                // Mirror into the per-database cache so the next visit
+                // to this database can render this record set instantly
+                // (see `state.recordsByDatabaseID`).
+                if let db {
+                    state.recordsByDatabaseID[db.id] = records
+                }
                 if let db {
                     // Calendar requires a date / date_tz property to plot
                     // against. Fall back to table when the database
@@ -893,6 +1028,10 @@ struct AppFeature {
                         state.viewKind = db.defaultView
                     }
                 }
+                return noop ? .none : Self.recomputeDerived(state)
+
+            case let .derivedRecordsReady(derived):
+                state.derivedRecords = derived
                 return .none
 
             case let .databaseContextLoaded(db, props):
@@ -1429,7 +1568,7 @@ struct AppFeature {
                 // remaining-count progress.
                 let backingDB = state.currentView?.databaseID ?? state.currentDB?.id
                 guard let dbID = backingDB else { return .none }
-                let recordIDs = state.filteredRecords.map(\.id)
+                let recordIDs = state.derivedRecords.filteredSorted.map(\.id)
                 guard !recordIDs.isEmpty else { return .none }
                 state.enrichingRecordIDs.formUnion(recordIDs)
                 return .run { send in
@@ -1472,6 +1611,9 @@ struct AppFeature {
                 }
                 if let idx = state.currentRecords.firstIndex(where: { $0.id == recordID }) {
                     state.currentRecords[idx].title = title
+                    if let dbID = state.currentDB?.id {
+                        state.recordsByDatabaseID[dbID] = state.currentRecords
+                    }
                 }
                 return .run { send in
                     try? dbClient.updateRecordTitle(recordID, title)
@@ -1491,6 +1633,9 @@ struct AppFeature {
                         state.currentRecords[idx].values.removeValue(forKey: key)
                     } else {
                         state.currentRecords[idx].values[key] = value
+                    }
+                    if let dbID = state.currentDB?.id {
+                        state.recordsByDatabaseID[dbID] = state.currentRecords
                     }
                 }
                 // Auto-status nudge for books: when current_page first
@@ -1568,6 +1713,7 @@ struct AppFeature {
                 state.currentRecord = nil
                 state.currentRecordRelated = []
                 state.currentRecords.removeAll { $0.id == recID }
+                state.recordsByDatabaseID[dbID]?.removeAll { $0.id == recID }
                 return .run { send in
                     try? dbClient.deleteRecord(recID)
                     await send(.refreshSidebar)
@@ -1582,6 +1728,7 @@ struct AppFeature {
                 if case .database(let viewing) = state.nav, viewing == databaseID {
                     state.currentRecords = []
                 }
+                state.recordsByDatabaseID.removeValue(forKey: databaseID)
                 return .run { send in
                     _ = try? dbClient.deleteAllRecordsInDatabase(databaseID)
                     await send(.refreshSidebar)
@@ -1984,6 +2131,12 @@ struct AppFeature {
                 // hidden — otherwise the detail view keeps showing it
                 // until the user navigates away.
                 state.currentRecords.removeAll { hidden.contains($0.id) }
+                // Mirror the redaction into every cached database
+                // record set so a return visit doesn't briefly show
+                // freshly-hidden records before the reload completes.
+                for dbID in state.recordsByDatabaseID.keys {
+                    state.recordsByDatabaseID[dbID]?.removeAll { hidden.contains($0.id) }
+                }
                 state.currentRecordRelated.removeAll { hidden.contains($0.id) }
                 state.currentOutgoingRelations.removeAll { hidden.contains($0.targetRecordID) }
                 state.currentIncomingRelations.removeAll { hidden.contains($0.sourceRecordID) }
@@ -2091,6 +2244,42 @@ struct AppFeature {
                 // the shared record asynchronously and the existing
                 // sync-status observation surfaces it. Logged via the
                 // CloudKit subsystem.
+                return .none
+            }
+        }
+
+        // Derivation trigger: fires the off-MainActor recompute effect
+        // for any action that mutated filter/sort/group/record inputs.
+        // Runs AFTER the main `Reduce` (so `state` reflects post-mutation
+        // values). The recompute itself is `cancelInFlight`-cancellable
+        // so a burst of input changes converges to one final
+        // `.derivedRecordsReady` assignment — not one per action. This
+        // is the design that supersedes the prior failed attempt to
+        // memoize `filteredRecords` directly into State (which fired
+        // `@ObservableState` willSet on every CloudKit tick during
+        // scroll, causing the 24-second layout cascade).
+        //
+        // `.databaseLoaded` is intentionally NOT in this set — it
+        // handles its own recompute inline with a no-op suppression
+        // check against the prior record set, which is cheaper than
+        // re-running derivation for identical CloudKit re-emits.
+        Reduce { state, action in
+            switch action {
+            case .toggleSort,
+                 .setGroupKey,
+                 .addFilter, .updateFilter, .removeFilter, .clearFilters,
+                 .updatePropertyValue,
+                 .recordCreated,
+                 .deleteCurrentRecord,
+                 .deleteAllRecordsInDatabase,
+                 .changeRecordDatabase,
+                 .setNav,
+                 .viewPrefsLoaded,
+                 .navigateAndPresetTagFilter,
+                 .addPropertyOption, .removePropertyOption,
+                 .updateRecordTitle:
+                return Self.recomputeDerived(state)
+            default:
                 return .none
             }
         }

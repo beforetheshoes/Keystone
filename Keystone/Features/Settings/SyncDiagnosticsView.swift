@@ -4,12 +4,6 @@ import Dependencies
 import AppKit
 #endif
 
-nonisolated(unsafe) private let syncEventISOFormatter: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f
-}()
-
 /// Sheet hosted by `SyncDiagnosticsSection`. Renders the recent
 /// `sync_events` rows with color-coded leading dots, plus action
 /// buttons that drive `SyncEngineClient.forcePull` / `forcePush`
@@ -179,7 +173,7 @@ struct SyncDiagnosticsView: View {
 
     private var lastSyncDisplay: String {
         guard let stamp = summary?.lastSyncTimestamp,
-              let date = syncEventISOFormatter.date(from: stamp) else { return "—" }
+              let date = AppDatabase.isoFormatter.date(from: stamp) else { return "—" }
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
         return f.localizedString(for: date, relativeTo: Date())
@@ -285,7 +279,7 @@ private struct SyncEventRow: View {
     }
 
     private var timeDisplay: String {
-        guard let date = syncEventISOFormatter.date(from: event.timestamp) else {
+        guard let date = AppDatabase.isoFormatter.date(from: event.timestamp) else {
             return event.timestamp
         }
         let f = DateFormatter()

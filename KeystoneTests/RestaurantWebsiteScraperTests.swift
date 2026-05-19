@@ -1,4 +1,5 @@
 import XCTest
+import Synchronization
 @testable import Keystone
 
 final class HTMLHeadExtractorTests: XCTestCase {
@@ -178,12 +179,19 @@ final class RestaurantWebsiteScraperTests: XCTestCase {
 
 // MARK: - Test double
 
-final class StubScrapingHTTP: RestaurantScrapingHTTP, @unchecked Sendable {
+final class StubScrapingHTTP: RestaurantScrapingHTTP, Sendable {
     private let htmlByURL: [URL: String]
     private let bytesByURL: [URL: Data]
     private let htmlProbeOK: Set<URL>
-    private(set) var fetchedHTMLURLs: [URL] = []
-    private(set) var fetchedByteURLs: [URL] = []
+
+    private let recorded = Mutex<Recorded>(Recorded())
+    var fetchedHTMLURLs: [URL] { recorded.withLock { $0.html } }
+    var fetchedByteURLs: [URL] { recorded.withLock { $0.bytes } }
+
+    private struct Recorded {
+        var html: [URL] = []
+        var bytes: [URL] = []
+    }
 
     init(html: [URL: String] = [:],
          bytes: [URL: Data] = [:],
@@ -194,13 +202,13 @@ final class StubScrapingHTTP: RestaurantScrapingHTTP, @unchecked Sendable {
     }
 
     func fetchHTML(_ url: URL) async -> (html: String, finalURL: URL)? {
-        fetchedHTMLURLs.append(url)
+        recorded.withLock { $0.html.append(url) }
         guard let html = htmlByURL[url] else { return nil }
         return (html, url)
     }
 
     func fetchBytes(_ url: URL) async -> Data? {
-        fetchedByteURLs.append(url)
+        recorded.withLock { $0.bytes.append(url) }
         return bytesByURL[url]
     }
 

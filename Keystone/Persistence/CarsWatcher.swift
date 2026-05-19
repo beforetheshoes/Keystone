@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import Synchronization
 
 // FSEventStream is a macOS-only API surface inside CoreServices —
 // the symbols (`FSEventStreamCreate`, `kFSEventStreamCreateFlagFileEvents`,
@@ -31,13 +32,22 @@ private let watcherLog = Logger(subsystem: "Keystone", category: "CarsWatcher")
 ///   and dispatches a debounced import pass on a utility queue.
 /// - `stop()` invalidates the stream cleanly. Safe to call multiple
 ///   times.
-final class CarsWatcher: @unchecked Sendable {
+/// `FSEventStreamRef` is a CoreFoundation pointer (not `Sendable`),
+/// and `Task<Void, Never>` plus `Set<String>` are also non-Sendable
+/// when stored mutably. We bundle all three into a `Mutex<State>` —
+/// `Mutex` is `Sendable` by declaration regardless of its payload,
+/// so the enclosing class becomes auto-Sendable via stored-property
+/// inference. No `@unchecked` escape; every mutation goes through
+/// `withLock`.
+final class CarsWatcher: Sendable {
     static let shared = CarsWatcher()
 
-    private let lock = NSLock()
-    private var stream: FSEventStreamRef?
-    private var debounceTask: Task<Void, Never>?
-    private var pendingPaths: Set<String> = []
+    private struct State {
+        var stream: FSEventStreamRef?
+        var debounceTask: Task<Void, Never>?
+        var pendingPaths: Set<String> = []
+    }
+    private let state = Mutex<State>(State())
     private let workQueue = DispatchQueue(label: "com.ryanleewilliams.keystone.cars-watcher", qos: .utility)
 
     private init() {}
@@ -49,54 +59,56 @@ final class CarsWatcher: @unchecked Sendable {
             try? fm.createDirectory(at: carsRoot, withIntermediateDirectories: true)
         }
 
-        lock.lock(); defer { lock.unlock() }
-        if stream != nil { return }   // already running
+        state.withLock { state in
+            if state.stream != nil { return }   // already running
 
-        watcherLog.info("CarsWatcher.start watching \(carsRoot.path, privacy: .public)")
+            watcherLog.info("CarsWatcher.start watching \(carsRoot.path, privacy: .public)")
 
-        let paths = [carsRoot.path] as CFArray
-        var context = FSEventStreamContext(
-            version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil,
-            release: nil,
-            copyDescription: nil
-        )
-        let flags = UInt32(
-            kFSEventStreamCreateFlagFileEvents
-            | kFSEventStreamCreateFlagNoDefer
-            | kFSEventStreamCreateFlagUseCFTypes
-            | kFSEventStreamCreateFlagWatchRoot
-        )
+            let paths = [carsRoot.path] as CFArray
+            var context = FSEventStreamContext(
+                version: 0,
+                info: Unmanaged.passUnretained(self).toOpaque(),
+                retain: nil,
+                release: nil,
+                copyDescription: nil
+            )
+            let flags = UInt32(
+                kFSEventStreamCreateFlagFileEvents
+                | kFSEventStreamCreateFlagNoDefer
+                | kFSEventStreamCreateFlagUseCFTypes
+                | kFSEventStreamCreateFlagWatchRoot
+            )
 
-        guard let s = FSEventStreamCreate(
-            kCFAllocatorDefault,
-            CarsWatcher.callback,
-            &context,
-            paths,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.5,    // latency in seconds — coalesces bursts from iCloud sync
-            flags
-        ) else {
-            watcherLog.error("FSEventStreamCreate failed")
-            return
+            guard let s = FSEventStreamCreate(
+                kCFAllocatorDefault,
+                CarsWatcher.callback,
+                &context,
+                paths,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                0.5,    // latency in seconds — coalesces bursts from iCloud sync
+                flags
+            ) else {
+                watcherLog.error("FSEventStreamCreate failed")
+                return
+            }
+
+            FSEventStreamSetDispatchQueue(s, workQueue)
+            FSEventStreamStart(s)
+            state.stream = s
         }
-
-        FSEventStreamSetDispatchQueue(s, workQueue)
-        FSEventStreamStart(s)
-        self.stream = s
     }
 
     func stop() {
-        lock.lock(); defer { lock.unlock() }
-        if let s = stream {
-            FSEventStreamStop(s)
-            FSEventStreamInvalidate(s)
-            FSEventStreamRelease(s)
-            stream = nil
+        state.withLock { state in
+            if let s = state.stream {
+                FSEventStreamStop(s)
+                FSEventStreamInvalidate(s)
+                FSEventStreamRelease(s)
+                state.stream = nil
+            }
+            state.debounceTask?.cancel()
+            state.debounceTask = nil
         }
-        debounceTask?.cancel()
-        debounceTask = nil
     }
 
     // MARK: - Event handling
@@ -122,33 +134,36 @@ final class CarsWatcher: @unchecked Sendable {
     }
 
     private func absorb(paths: [String], count: Int) {
-        lock.lock()
-        for path in paths {
-            // Only consider markdown sidecars and folders that
-            // contain them. We scan parent folders rather than
-            // enumerate every event from FSEventStream — a single
-            // edit can produce multiple events (write, rename, etc.)
-            // and the import is idempotent so dedup is cheap.
-            pendingPaths.insert(path)
+        state.withLock { state in
+            for path in paths {
+                // Only consider markdown sidecars and folders that
+                // contain them. We scan parent folders rather than
+                // enumerate every event from FSEventStream — a single
+                // edit can produce multiple events (write, rename, etc.)
+                // and the import is idempotent so dedup is cheap.
+                state.pendingPaths.insert(path)
+            }
+            state.debounceTask?.cancel()
+            // `Task.detached` (not `Task { }`) because this is called from
+            // an FSEventStream callback running on `workQueue` — no parent
+            // task or actor context to inherit, and the debounce task is
+            // owned by the watcher's lifetime, not the callback's.
+            state.debounceTask = Task.detached(priority: .utility) { [weak self] in
+                // Debounce 0.5 s on top of FSEventStream's own latency to
+                // catch atomic-rename storms and editor-save bursts.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.processPending()
+            }
         }
-        debounceTask?.cancel()
-        debounceTask = Task.detached(priority: .utility) { [weak self] in
-            // Debounce 0.5 s on top of FSEventStream's own latency to
-            // catch atomic-rename storms and editor-save bursts.
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard !Task.isCancelled else { return }
-            await self?.processPending()
-        }
-        lock.unlock()
     }
 
     private func processPending() async {
-        let paths: [String] = {
-            lock.lock(); defer { lock.unlock() }
-            let snapshot = pendingPaths
-            pendingPaths.removeAll()
+        let paths: [String] = state.withLock { state in
+            let snapshot = state.pendingPaths
+            state.pendingPaths.removeAll()
             return Array(snapshot)
-        }()
+        }
         guard !paths.isEmpty else { return }
 
         // Identify markdown sidecars whose current content doesn't
@@ -210,7 +225,7 @@ final class CarsWatcher: @unchecked Sendable {
 /// `<workspace>/Cars/` sidecar surface is a Mac-only authoring
 /// workflow today. Keeping a callable shape so call sites in shared
 /// reducers compile without a conditional gate at every use.
-final class CarsWatcher: @unchecked Sendable {
+final class CarsWatcher: Sendable {
     static let shared = CarsWatcher()
     private init() {}
     func start() {}

@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import os
 
 private let log = Logger(subsystem: "Keystone", category: "Enrichment.GoogleBooks")
 
@@ -214,11 +215,10 @@ enum GoogleBooksHTTP {
     private static let cooldownDuration: TimeInterval = 30 * 60
 
     /// When `Date.now` is past this stamp, requests are allowed again.
-    /// Wrapped in a lock so multiple concurrent enrichment passes
-    /// observe a consistent value. `nonisolated(unsafe)` is OK because
-    /// every read/write goes through `cooldownLock`.
-    nonisolated(unsafe) private static var cooldownUntil: Date?
-    private static let cooldownLock = NSLock()
+    /// `OSAllocatedUnfairLock` is `Sendable` by declaration, so the
+    /// cool-down state is compiler-verified safe to share across
+    /// concurrent enrichment passes.
+    private static let cooldown = OSAllocatedUnfairLock<Date?>(initialState: nil)
 
     /// Public read of the cool-down state. Used by callers that want
     /// to short-circuit *before* building a request (e.g. an enrichment
@@ -227,31 +227,29 @@ enum GoogleBooksHTTP {
     static var isQuotaCooldownActive: Bool { isInCooldown }
 
     private static var isInCooldown: Bool {
-        cooldownLock.lock()
-        defer { cooldownLock.unlock() }
-        guard let until = cooldownUntil else { return false }
-        if Date() >= until {
-            cooldownUntil = nil
-            return false
+        cooldown.withLock { until in
+            guard let u = until else { return false }
+            if Date() >= u {
+                until = nil
+                return false
+            }
+            return true
         }
-        return true
     }
 
     private static func enterCooldown() {
-        cooldownLock.lock()
-        defer { cooldownLock.unlock() }
-        let already = cooldownUntil.map { Date() < $0 } ?? false
-        if !already {
-            cooldownUntil = Date().addingTimeInterval(cooldownDuration)
+        cooldown.withLock { until in
+            let already = until.map { Date() < $0 } ?? false
+            if !already {
+                until = Date().addingTimeInterval(cooldownDuration)
+            }
         }
     }
 
     /// Test-only escape hatch. Lets unit tests reset the cool-down so
     /// quota-aware paths can be exercised deterministically.
     static func _resetCooldownForTesting() {
-        cooldownLock.lock()
-        defer { cooldownLock.unlock() }
-        cooldownUntil = nil
+        cooldown.withLock { $0 = nil }
     }
 
     /// 3 attempts with exponential backoff (200ms → 400ms → 800ms) on

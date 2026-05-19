@@ -109,6 +109,7 @@ enum VendorLookupService {
     /// Wrapper for `MKLocalSearchCompleter` so callers can fire
     /// search-as-you-type without managing the delegate dance directly.
     /// Returns at most 10 completions per call.
+    @MainActor
     static func searchAutocomplete(query: String, region: MKCoordinateRegion? = nil) async -> [MKLocalSearchCompletion] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
@@ -216,26 +217,37 @@ enum VendorLookupService {
 /// Bridges `MKLocalSearchCompleter`'s delegate-based API to async/await.
 /// One-shot — fires the continuation on the first delegate callback,
 /// then tears down.
+///
+/// Isolation contract: every entry point (`start`, the delegate
+/// callbacks, and `fire`) runs on `MainActor` — `MKLocalSearchCompleter`
+/// is a `MainActor`-isolated API and its delegate calls land on the
+/// queue it was created on (always main here). The class is
+/// `@unchecked Sendable` because `MKLocalSearchCompletion` is not
+/// `Sendable` (Apple has not annotated it) and replacing the array
+/// with a `Sendable` transport would force a major callsite redesign
+/// in `AddressAutocompleteField` for a single non-Sendable boundary.
+/// All mutable state (`completer`, `didFire`) is touched only on
+/// MainActor; the lock-free flow is verified by inspection rather
+/// than by the compiler.
 @available(iOS 26.0, macOS 26.0, *)
+@MainActor
 private final class AutocompleteCoordinator: NSObject, MKLocalSearchCompleterDelegate, @unchecked Sendable {
     private let continuation: CheckedContinuation<[MKLocalSearchCompletion], Never>
     private var completer: MKLocalSearchCompleter?
     private var didFire = false
 
-    init(continuation: CheckedContinuation<[MKLocalSearchCompletion], Never>) {
+    nonisolated init(continuation: CheckedContinuation<[MKLocalSearchCompletion], Never>) {
         self.continuation = continuation
         super.init()
     }
 
     func start(query: String, region: MKCoordinateRegion?) {
-        Task { @MainActor in
-            let completer = MKLocalSearchCompleter()
-            completer.delegate = self
-            completer.resultTypes = [.pointOfInterest]
-            if let region { completer.region = region }
-            completer.queryFragment = query
-            self.completer = completer
-        }
+        let completer = MKLocalSearchCompleter()
+        completer.delegate = self
+        completer.resultTypes = [.pointOfInterest]
+        if let region { completer.region = region }
+        completer.queryFragment = query
+        self.completer = completer
     }
 
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
@@ -251,9 +263,14 @@ private final class AutocompleteCoordinator: NSObject, MKLocalSearchCompleterDel
         didFire = true
         completer?.cancel()
         completer = nil
-        // `MKLocalSearchCompletion` isn't Sendable, but we're handing
-        // ownership off here (one-shot, never touched again on this
-        // side), so suppress the warning explicitly.
+        // `MKLocalSearchCompletion` isn't `Sendable` (Apple hasn't
+        // annotated it) but the awaiter consumes the array on the
+        // same MainActor we resume from — there is no real boundary
+        // crossing. The `nonisolated(unsafe)` is the documented escape
+        // for this exact pattern; eliminating it would force a
+        // Sendable-transport redesign in `AddressAutocompleteField`
+        // which still needs the raw completion to call
+        // `MKLocalSearch.Request(completion:)`.
         nonisolated(unsafe) let payload = results
         continuation.resume(returning: payload)
     }

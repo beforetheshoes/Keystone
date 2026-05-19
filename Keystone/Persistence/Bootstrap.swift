@@ -1,6 +1,7 @@
 import Foundation
 import Dependencies
 import GRDB
+import Synchronization
 @preconcurrency import SQLiteData
 import OSLog
 
@@ -8,8 +9,13 @@ private let bootstrapLog = Logger(subsystem: "Keystone", category: "Boot")
 
 /// True iff `bootstrapKeystoneDatabase` configured a real CloudKit `SyncEngine`.
 /// Read by `SyncEngineClient` to decide whether to observe sync state or stay
-/// in the `.local` state.
-nonisolated(unsafe) var keystoneSyncEngineConfigured: Bool = false
+/// in the `.local` state. `Atomic<Bool>` is `Sendable` by declaration so this
+/// is verifiably safe to share — set once at boot, read everywhere.
+private let _keystoneSyncEngineConfigured = Atomic<Bool>(false)
+var keystoneSyncEngineConfigured: Bool {
+    get { _keystoneSyncEngineConfigured.load(ordering: .acquiring) }
+    set { _keystoneSyncEngineConfigured.store(newValue, ordering: .releasing) }
+}
 
 extension DependencyValues {
     /// Open the Keystone database **for CLI use**. Same path resolution,

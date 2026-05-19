@@ -64,7 +64,7 @@ final class PerRecordKeyRotationTests: XCTestCase {
             // Run rotation. Resolve the writer via the same dependency
             // path Bootstrap uses — synchronous read is fine because
             // the runIfNeeded helper drives writer.write/read directly.
-            ProtectionKeyRotation.runIfNeeded(writer: db as! any DatabaseWriter, keys: client)
+            ProtectionKeyRotation.runIfNeeded(writer: db, keys: client)
 
             // Workspace key gone.
             XCTAssertNil(try client.legacyWorkspaceKey())
@@ -89,7 +89,7 @@ final class PerRecordKeyRotationTests: XCTestCase {
             let client = ProtectionKeyClient.makeClient(store: store)
             @Dependency(\.defaultDatabase) var db
             // No workspace key in the keychain → early return, no work.
-            ProtectionKeyRotation.runIfNeeded(writer: db as! any DatabaseWriter, keys: client)
+            ProtectionKeyRotation.runIfNeeded(writer: db, keys: client)
             XCTAssertNil(try client.legacyWorkspaceKey())
         }
     }
@@ -132,7 +132,7 @@ final class PerRecordKeyRotationTests: XCTestCase {
                 ])
             }
 
-            ProtectionKeyRotation.runIfNeeded(writer: db as! any DatabaseWriter, keys: client)
+            ProtectionKeyRotation.runIfNeeded(writer: db, keys: client)
 
             // Both rows decrypt under their per-record keys; workspace
             // key is gone.

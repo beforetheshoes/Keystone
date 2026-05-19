@@ -1,5 +1,7 @@
 import Foundation
 import Security
+import Synchronization
+import os
 
 /// User-supplied API keys for third-party enrichment providers. Stored in
 /// the system Keychain (service `com.ryanleewilliams.keystone.api-keys`)
@@ -42,7 +44,14 @@ enum APIKeys {
     static let serviceName = "com.ryanleewilliams.keystone.api-keys"
 
     /// Mutable for tests — production code reads/writes the real keychain.
-    nonisolated(unsafe) static var store: KeychainStore = SecItemKeychainStore()
+    /// Lock-wrapped so the slot is `Sendable` for the compiler; tests
+    /// reassign before kicking off any concurrent reads, so contention
+    /// is zero in practice.
+    private static let _store = OSAllocatedUnfairLock<KeychainStore>(initialState: SecItemKeychainStore())
+    static var store: KeychainStore {
+        get { _store.withLock { $0 } }
+        set { _store.withLock { $0 = newValue } }
+    }
 
     static func get(_ kind: APIKeyKind) -> String? {
         store.get(account: kind.rawValue, service: serviceName)
@@ -98,19 +107,21 @@ struct SecItemKeychainStore: KeychainStore {
     }
 }
 
-/// In-memory backend used by tests. Swap in via `APIKeys.store = InMemoryKeychainStore()`.
-final class InMemoryKeychainStore: KeychainStore, @unchecked Sendable {
-    private var values: [String: String] = [:]
-    private let lock = NSLock()
+/// In-memory backend used by tests. Swap in via
+/// `APIKeys.store = InMemoryKeychainStore()`. All mutable state lives
+/// inside a `Mutex`, so the compiler synthesizes `Sendable` conformance
+/// automatically — no `@unchecked` escape.
+final class InMemoryKeychainStore: KeychainStore {
+    private let values = Mutex<[String: String]>([:])
 
     func get(account: String, service: String) -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return values["\(service)|\(account)"]
+        values.withLock { $0["\(service)|\(account)"] }
     }
 
     func set(_ value: String?, account: String, service: String) {
-        lock.lock(); defer { lock.unlock() }
-        let key = "\(service)|\(account)"
-        if let value { values[key] = value } else { values.removeValue(forKey: key) }
+        values.withLock { values in
+            let key = "\(service)|\(account)"
+            if let value { values[key] = value } else { values.removeValue(forKey: key) }
+        }
     }
 }

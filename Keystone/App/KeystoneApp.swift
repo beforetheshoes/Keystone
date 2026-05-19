@@ -44,6 +44,13 @@ struct KeystoneApp: App {
         // returns nil on the main thread on first call (Apple explicitly
         // documents this); without priming, resolve() throws and we
         // silently fall back to the sandbox container.
+        //
+        // GCD + DispatchSemaphore here, not Swift concurrency, because
+        // this runs inside `KeystoneApp.init` — a *synchronous* App
+        // initializer. We can't `await` and can't make the init async,
+        // so structured concurrency isn't an option. The semaphore
+        // bounds the wait so a broken iCloud account doesn't deadlock
+        // app launch.
         if WorkspaceLocation.current.isICloud {
             let semaphore = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -54,8 +61,7 @@ struct KeystoneApp: App {
             }
             // First-launch-after-install can take several seconds while
             // CloudKit provisions the container; subsequent launches are
-            // near-instant. Bound the wait so a permanently broken
-            // iCloud account doesn't deadlock the app.
+            // near-instant.
             _ = semaphore.wait(timeout: .now() + 12)
         }
 

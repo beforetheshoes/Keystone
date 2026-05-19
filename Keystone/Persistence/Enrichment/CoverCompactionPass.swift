@@ -161,9 +161,10 @@ enum CoverCompactionPass {
 
         // Bust the in-memory thumbnail cache so the gallery picks up
         // the smaller file on its next decode rather than serving the
-        // cached large-source thumbnail.
-        ThumbnailLoader.invalidate(url: absoluteURL)
-        ThumbnailLoader.invalidate(url: newURL)
+        // cached large-source thumbnail. `invalidateAll` drops the
+        // whole cache (NSCache has no enumeration API); cover
+        // compaction is one-shot at boot, so warm-up cost is negligible.
+        await ThumbnailDecoder.invalidateAll()
 
         return .ok(beforeBytes: beforeSize, afterBytes: newSize)
     }

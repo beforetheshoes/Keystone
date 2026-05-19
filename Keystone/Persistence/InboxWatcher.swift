@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 import CryptoKit
 import OSLog
+import Synchronization
 @preconcurrency import SQLiteData
 
 private let log = Logger(subsystem: "Keystone", category: "Inbox")
@@ -20,30 +21,35 @@ private let log = Logger(subsystem: "Keystone", category: "Inbox")
 ///   scan instead of one-per-file thrash.
 /// - `onImport` fires on the main actor whenever at least one file was
 ///   imported, so the UI can refresh the sidebar / current records list.
-final class InboxWatcher: @unchecked Sendable {
+/// All mutable state lives inside a `Mutex<State>` bundle. `Mutex` is
+/// `Sendable` regardless of its payload, so the class becomes
+/// auto-Sendable from its stored properties — no `@unchecked` escape.
+final class InboxWatcher: Sendable {
     static let shared = InboxWatcher()
 
-    private let lock = NSLock()
-    private var fileDescriptor: CInt = -1
-    private var source: DispatchSourceFileSystemObject?
-    private var debounceTask: Task<Void, Never>?
-    private var onImport: (@MainActor () -> Void)?
+    private struct State {
+        var fileDescriptor: CInt = -1
+        var source: DispatchSourceFileSystemObject?
+        var debounceTask: Task<Void, Never>?
+        var onImport: (@MainActor () -> Void)?
+    }
+    private let state = Mutex<State>(State())
     private let scanQueue = DispatchQueue(label: "com.ryanleewilliams.keystone.inbox-scan", qos: .utility)
 
     private init() {}
 
     func start(onImport: @escaping @MainActor () -> Void) {
-        lock.lock()
-        self.onImport = onImport
-        if let existing = source {
-            existing.cancel()
-            source = nil
+        state.withLock { state in
+            state.onImport = onImport
+            if let existing = state.source {
+                existing.cancel()
+                state.source = nil
+            }
+            if state.fileDescriptor >= 0 {
+                close(state.fileDescriptor)
+                state.fileDescriptor = -1
+            }
         }
-        if fileDescriptor >= 0 {
-            close(fileDescriptor)
-            fileDescriptor = -1
-        }
-        lock.unlock()
 
         let inbox = Self.ensureInboxFolder()
         log.info("InboxWatcher.start watching \(inbox.path, privacy: .public)")
@@ -54,15 +60,16 @@ final class InboxWatcher: @unchecked Sendable {
     }
 
     func stop() {
-        lock.lock(); defer { lock.unlock() }
-        source?.cancel()
-        source = nil
-        if fileDescriptor >= 0 {
-            close(fileDescriptor)
-            fileDescriptor = -1
+        state.withLock { state in
+            state.source?.cancel()
+            state.source = nil
+            if state.fileDescriptor >= 0 {
+                close(state.fileDescriptor)
+                state.fileDescriptor = -1
+            }
+            state.debounceTask?.cancel()
+            state.debounceTask = nil
         }
-        debounceTask?.cancel()
-        debounceTask = nil
     }
 
     // MARK: - Folder bootstrap
@@ -96,38 +103,44 @@ final class InboxWatcher: @unchecked Sendable {
         let fd = open(inbox.path, O_EVTONLY)
         guard fd >= 0 else { return }
 
-        lock.lock()
-        fileDescriptor = fd
-        let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .extend, .rename],
-            queue: scanQueue
-        )
-        src.setEventHandler { [weak self] in
-            self?.scheduleDebouncedScan(inbox: inbox)
-        }
-        src.setCancelHandler { [weak self] in
-            self?.lock.lock()
-            if let cur = self?.fileDescriptor, cur >= 0 {
-                close(cur)
-                self?.fileDescriptor = -1
+        let src = state.withLock { state -> DispatchSourceFileSystemObject in
+            state.fileDescriptor = fd
+            let src = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .extend, .rename],
+                queue: scanQueue
+            )
+            src.setEventHandler { [weak self] in
+                self?.scheduleDebouncedScan(inbox: inbox)
             }
-            self?.lock.unlock()
+            src.setCancelHandler { [weak self] in
+                guard let self else { return }
+                self.state.withLock { state in
+                    if state.fileDescriptor >= 0 {
+                        close(state.fileDescriptor)
+                        state.fileDescriptor = -1
+                    }
+                }
+            }
+            state.source = src
+            return src
         }
-        source = src
-        lock.unlock()
         src.resume()
     }
 
     private func scheduleDebouncedScan(inbox: URL) {
-        lock.lock()
-        debounceTask?.cancel()
-        debounceTask = Task.detached(priority: .utility) { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard !Task.isCancelled else { return }
-            await self?.scan(inbox: inbox)
+        state.withLock { state in
+            state.debounceTask?.cancel()
+            // `Task.detached` (not `Task { }`) because this is called from
+            // an FSEventStream callback that runs on `scanQueue` — there's
+            // no parent task or actor context to inherit, and the debounce
+            // task is owned by the watcher's lifetime, not the callback's.
+            state.debounceTask = Task.detached(priority: .utility) { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.scan(inbox: inbox)
+            }
         }
-        lock.unlock()
     }
 
     // MARK: - Scan + import
@@ -208,7 +221,7 @@ final class InboxWatcher: @unchecked Sendable {
             }
         }
 
-        if importedAny, let cb = onImport {
+        if importedAny, let cb = state.withLock({ $0.onImport }) {
             await MainActor.run { cb() }
         }
 

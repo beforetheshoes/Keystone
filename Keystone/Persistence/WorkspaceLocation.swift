@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// Where the user's `workspace.sqlite` + `Assets/` live on this device.
 /// Stored in UserDefaults, defaulting to `.container` for first-launch
@@ -69,51 +70,60 @@ enum WorkspaceLocationError: LocalizedError {
 /// instance is shared across the app and held alive for the whole
 /// session — releasing it would close the scoped resource and break
 /// the open SQLite connection.
-final class WorkspaceLocationManager: @unchecked Sendable {
+///
+/// All mutable state (the cached resolved URL and the active scoped
+/// URL) is bundled inside a `Mutex`, so the compiler synthesizes
+/// `Sendable` conformance from the stored properties — no
+/// `@unchecked` escape.
+final class WorkspaceLocationManager: Sendable {
     static let shared = WorkspaceLocationManager()
 
-    private let lock = NSLock()
-    private var cachedURL: URL?
-    private var scopedURL: URL?
+    private struct Resolution {
+        var cachedURL: URL?
+        var scopedURL: URL?
+    }
+    private let state = Mutex<Resolution>(Resolution())
 
     /// Resolve the current location to a concrete on-disk URL, creating
     /// the directory if needed. Caches the result; call `invalidate()`
     /// after switching the active location.
     func resolve() throws -> URL {
-        lock.lock(); defer { lock.unlock() }
-        if let cached = cachedURL { return cached }
-
-        let url = try resolveLocked(WorkspaceLocation.current)
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: url.path) {
-            do {
-                try fm.createDirectory(at: url, withIntermediateDirectories: true)
-            } catch {
-                throw WorkspaceLocationError.directoryCreationFailed(url, underlying: error)
+        try state.withLock { resolution in
+            if let cached = resolution.cachedURL { return cached }
+            let url = try Self.resolveLocked(WorkspaceLocation.current, resolution: &resolution)
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: url.path) {
+                do {
+                    try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                } catch {
+                    throw WorkspaceLocationError.directoryCreationFailed(url, underlying: error)
+                }
             }
+            resolution.cachedURL = url
+            return url
         }
-        cachedURL = url
-        return url
     }
 
     /// Resolve an arbitrary location without touching the cache or the
     /// scoped-resource state — useful during migration so we can resolve
     /// both source and destination side-by-side.
     func resolve(_ location: WorkspaceLocation) throws -> URL {
-        lock.lock(); defer { lock.unlock() }
-        return try resolveLocked(location)
+        try state.withLock { resolution in
+            try Self.resolveLocked(location, resolution: &resolution)
+        }
     }
 
     func invalidate() {
-        lock.lock(); defer { lock.unlock() }
-        cachedURL = nil
-        if let scopedURL {
-            scopedURL.stopAccessingSecurityScopedResource()
+        state.withLock { resolution in
+            resolution.cachedURL = nil
+            if let scopedURL = resolution.scopedURL {
+                scopedURL.stopAccessingSecurityScopedResource()
+            }
+            resolution.scopedURL = nil
         }
-        scopedURL = nil
     }
 
-    private func resolveLocked(_ location: WorkspaceLocation) throws -> URL {
+    private static func resolveLocked(_ location: WorkspaceLocation, resolution: inout Resolution) throws -> URL {
         switch location {
         case .container:
             return Self.containerWorkspaceFolder
@@ -138,10 +148,10 @@ final class WorkspaceLocationManager: @unchecked Sendable {
             // Release the previously-scoped URL (if any) so we don't leak
             // an access count when the same manager is asked to resolve
             // multiple times across location changes.
-            if let prior = scopedURL, prior != url {
+            if let prior = resolution.scopedURL, prior != url {
                 prior.stopAccessingSecurityScopedResource()
             }
-            scopedURL = url
+            resolution.scopedURL = url
             return url
 
         case .iCloudDrive:

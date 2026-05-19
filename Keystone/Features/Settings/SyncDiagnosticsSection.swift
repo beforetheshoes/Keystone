@@ -79,7 +79,7 @@ struct SyncDiagnosticsSection: View {
 
     private var formattedLastSync: String {
         guard let stamp = summary?.lastSyncTimestamp,
-              let date = Self.iso.date(from: stamp) else { return "—" }
+              let date = AppDatabase.isoFormatter.date(from: stamp) else { return "—" }
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
         return f.localizedString(for: date, relativeTo: Date())
@@ -94,9 +94,4 @@ struct SyncDiagnosticsSection: View {
         return n.formatted(.number)
     }
 
-    nonisolated(unsafe) private static let iso: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
 }

@@ -95,7 +95,7 @@ private struct MacMainPane: View {
                     accent: view.accent,
                     defaultView: backing.defaultView,
                     sortIndex: view.sortIndex,
-                    recordCount: store.filteredRecords.count
+                    recordCount: store.derivedRecords.filteredSorted.count
                 )
                 DatabaseDetailView(store: store, db: header)
             } else {
@@ -147,10 +147,18 @@ import AppKit
 private struct WindowAccessory: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
+        // The NSView isn't attached to a window during makeNSView; we
+        // must defer to the next runloop iteration for `v.window` to
+        // resolve. `DispatchQueue.main.async` is the right tool for
+        // runloop-precise deferral; `Task { @MainActor in }` schedules
+        // on Swift's MainActor executor which may run within the
+        // current frame and miss the window attachment.
         DispatchQueue.main.async { configure(v.window) }
         return v
     }
     func updateNSView(_ nsView: NSView, context: Context) {
+        // See `makeNSView` for the rationale on `DispatchQueue.main.async`
+        // over Swift concurrency here.
         DispatchQueue.main.async { configure(nsView.window) }
     }
     private func configure(_ window: NSWindow?) {

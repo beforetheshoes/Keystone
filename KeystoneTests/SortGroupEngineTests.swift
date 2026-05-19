@@ -119,7 +119,11 @@ final class SortGroupEngineTests: XCTestCase {
             makeRecord(id: "d", values: ["status": ""]),
         ]
         let groups = GroupEngine.group(records, key: "status", properties: [prop])
-        XCTAssertEqual(groups.map(\.label), ["to_read", "reading", "read", "—"])
+        // Select-type bucket labels go through `SelectOptionDisplay.format`
+        // for the section-header display, turning the raw `"to_read"`
+        // option key into `"To read"`. Test against the formatted label
+        // because that's what users see.
+        XCTAssertEqual(groups.map(\.label), ["To read", "Reading", "Read", "—"])
         XCTAssertEqual(groups.last?.rows.map(\.id), ["d"])
     }
 
@@ -131,8 +135,11 @@ final class SortGroupEngineTests: XCTestCase {
             makeRecord(id: "c", values: ["tags": ""]),
         ]
         let groups = GroupEngine.group(records, key: "tags", properties: [prop])
-        let fictionRows = groups.first { $0.label == "fiction" }?.rows.map(\.id) ?? []
-        let mysteryRows = groups.first { $0.label == "mystery" }?.rows.map(\.id) ?? []
+        // multiSelect labels go through `SelectOptionDisplay.format`, so
+        // the bucket headers read as "Fiction" / "Mystery" in the UI.
+        // Look up by the raw bucket key, not the display label.
+        let fictionRows = groups.first { $0.key == "fiction" }?.rows.map(\.id) ?? []
+        let mysteryRows = groups.first { $0.key == "mystery" }?.rows.map(\.id) ?? []
         XCTAssertEqual(fictionRows, ["a"])
         XCTAssertEqual(mysteryRows, ["a", "b"])
         XCTAssertEqual(groups.last?.label, "—")

@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(CloudKit)
 import CloudKit
 #endif
@@ -22,8 +23,14 @@ enum ShareAcceptInbox {
     /// a share lands; the closure dispatches `.shareAccepted` into the
     /// store. `nil` until the app finishes initializing — early
     /// arrivals (rare; the OS only delivers after launch handoff) are
-    /// dropped.
-    nonisolated(unsafe) static var handler: (@Sendable (CKShare.Metadata) -> Void)?
+    /// dropped. Stored behind an `OSAllocatedUnfairLock` so the
+    /// compiler can verify `Sendable` safety; the slot is touched twice
+    /// per process lifetime (once at install, never reassigned).
+    private static let _handler = OSAllocatedUnfairLock<(@Sendable (CKShare.Metadata) -> Void)?>(initialState: nil)
+    static var handler: (@Sendable (CKShare.Metadata) -> Void)? {
+        get { _handler.withLock { $0 } }
+        set { _handler.withLock { $0 = newValue } }
+    }
 }
 
 #if os(macOS)

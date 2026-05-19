@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import OSLog
+import os
 @preconcurrency import SQLiteData
 
 private let log = Logger(subsystem: "Keystone", category: "Enrichment")
@@ -25,11 +26,11 @@ actor EnrichmentService {
     /// list is easy to find and amend; new providers slot into the array.
     /// MapKit provider is gated to 26+; the rest are version-agnostic.
     ///
-    /// Marked `nonisolated(unsafe)` so tests can swap in spy providers in
-    /// `setUp` without going through the actor. In production this value
-    /// is set once at process start and never reassigned, so the unsafety
-    /// is bounded to the test entry point.
-    nonisolated(unsafe) static var registry: [any EnrichmentProvider] = {
+    /// Tests swap in spy providers in `setUp` without going through the
+    /// actor. In production this value is set once at process start and
+    /// never reassigned. Lock-wrapped so the compiler can verify
+    /// `Sendable` safety.
+    private static let _registry = OSAllocatedUnfairLock<[any EnrichmentProvider]>(initialState: {
         var providers: [any EnrichmentProvider] = []
         #if canImport(MapKit)
         if #available(iOS 26.0, macOS 26.0, *) {
@@ -45,7 +46,11 @@ actor EnrichmentService {
         providers.append(TMDBMovieProvider())
         providers.append(TMDBTVProvider())
         return providers
-    }()
+    }())
+    static var registry: [any EnrichmentProvider] {
+        get { _registry.withLock { $0 } }
+        set { _registry.withLock { $0 = newValue } }
+    }
 
     private var inFlight: Task<Void, Never>?
 

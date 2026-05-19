@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Single source of truth for the Help table-of-contents. Topic IDs match the
 /// markdown filenames under `Keystone/Resources/Help/`.
@@ -43,7 +44,11 @@ enum HelpTopics {
 
     /// The bundle that owns the Help resources. Tests can override this to point
     /// at the test-target bundle when needed.
-    nonisolated(unsafe) static var bundle: Bundle = .main
+    private static let _bundle = OSAllocatedUnfairLock<Bundle>(initialState: .main)
+    static var bundle: Bundle {
+        get { _bundle.withLock { $0 } }
+        set { _bundle.withLock { $0 = newValue } }
+    }
 
     static func loadMarkdown(topicID: String) -> String {
         guard let url = resourceURL(for: topicID),

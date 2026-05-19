@@ -12,31 +12,39 @@ import Foundation
 ///   partial values (just a `yyyy-MM-dd` with no `|`) read out as nil
 ///   from `parseTZ` and the renderer falls back to the plain-date path.
 enum DateValueCodec {
-    // MARK: - Plain date (yyyy-MM-dd)
+    // MARK: - Cached formatters
+    //
+    // `DateFormatter` construction is expensive (hundreds of µs each).
+    // Every call to `iso` / `display` / `parse` used to allocate a
+    // fresh one; in a populated table that runs hundreds of times per
+    // scroll-stop, dominating cell-body cost. The formatters here are
+    // built once, configured for a fixed format/locale, and reused.
+    // `DateFormatter.string(from:)` / `date(from:)` are documented as
+    // safe across threads on iOS 7+ / macOS 10.9+ when their
+    // configuration is not mutated after init — which is the contract
+    // these cached instances honor (we never mutate them after the
+    // closure-init block).
 
-    /// Canonical wire format for plain dates.
-    static func iso(_ date: Date) -> String {
+    private static let isoFormatter: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
-    }
+        return f
+    }()
 
-    /// Display format shown in detail rows ("Mar 14, 1989").
-    static func display(_ date: Date) -> String {
+    private static let displayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .none
-        return f.string(from: date)
-    }
+        return f
+    }()
 
-    /// Permissive parser. Tries ISO first, then several common human formats
-    /// so existing free-form values like "Mar 14, 1989" or "04/14/1988"
-    /// continue to work without manual migration.
-    static func parse(_ raw: String) -> Date? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+    /// All the human-friendly formats we accept on the way in. Order
+    /// matters — ISO first, then the most common US formats, then
+    /// fallbacks. Each instance is configured once with `en_US_POSIX`
+    /// + gregorian and never mutated after.
+    private static let parseFormatters: [DateFormatter] = {
         let formats = [
             "yyyy-MM-dd",
             "MMM d, yyyy",
@@ -46,11 +54,34 @@ enum DateValueCodec {
             "yyyy/MM/dd",
             "d MMM yyyy",
         ]
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        for fmt in formats {
+        return formats.map { fmt in
+            let f = DateFormatter()
+            f.calendar = Calendar(identifier: .gregorian)
+            f.locale = Locale(identifier: "en_US_POSIX")
             f.dateFormat = fmt
+            return f
+        }
+    }()
+
+    // MARK: - Plain date (yyyy-MM-dd)
+
+    /// Canonical wire format for plain dates.
+    static func iso(_ date: Date) -> String {
+        isoFormatter.string(from: date)
+    }
+
+    /// Display format shown in detail rows ("Mar 14, 1989").
+    static func display(_ date: Date) -> String {
+        displayFormatter.string(from: date)
+    }
+
+    /// Permissive parser. Tries ISO first, then several common human formats
+    /// so existing free-form values like "Mar 14, 1989" or "04/14/1988"
+    /// continue to work without manual migration.
+    static func parse(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        for f in parseFormatters {
             if let d = f.date(from: trimmed) { return d }
         }
         return nil
@@ -104,8 +135,7 @@ enum DateValueCodec {
                 components.year ?? 0, components.month ?? 1, components.day ?? 1
             )
         } else {
-            let formatter = utcFormatter()
-            dateString = formatter.string(from: value.date)
+            dateString = utcFormatter.string(from: value.date)
         }
         return "\(dateString)|\(value.timezone.identifier)"
     }
@@ -177,18 +207,17 @@ enum DateValueCodec {
     }
 
     private static func parseUTC(_ raw: String) -> Date? {
-        let formatter = utcFormatter()
-        return formatter.date(from: raw)
+        utcFormatter.date(from: raw)
     }
 
-    private static func utcFormatter() -> DateFormatter {
+    private static let utcFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
         return formatter
-    }
+    }()
 }
 
 /// Parsed `date_tz` value.

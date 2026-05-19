@@ -2,6 +2,7 @@ import Foundation
 import Dependencies
 import GRDB
 import os
+import Synchronization
 @preconcurrency import SQLiteData
 
 private let bootLog = Logger(subsystem: "Keystone", category: "Boot")
@@ -69,12 +70,29 @@ func logFileState(at url: URL, label: String) {
     }
 }
 
+/// `Sendable` shim around `Date.ISO8601FormatStyle` that exposes the
+/// `ISO8601DateFormatter` method surface (`.string(from:)`,
+/// `.date(from:)`) the codebase already uses. The underlying
+/// `FormatStyle` is a value type and `Sendable` by composition, so
+/// this wrapper is verifiably safe to share — no
+/// `nonisolated(unsafe)` / `@unchecked Sendable` needed. Output
+/// matches the prior `ISO8601DateFormatter` configured with
+/// `[.withInternetDateTime, .withFractionalSeconds]` (RFC 3339 with
+/// millisecond precision: `2025-12-01T15:30:45.123Z`).
+struct ISO8601Stamp: Sendable {
+    private static let style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+    func string(from date: Date) -> String {
+        date.formatted(Self.style)
+    }
+
+    func date(from string: String) -> Date? {
+        try? Self.style.parse(string)
+    }
+}
+
 enum AppDatabase {
-    nonisolated(unsafe) static let isoFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
+    static let isoFormatter = ISO8601Stamp()
 
     /// Folder that holds the user-visible workspace contents — `Inbox/`,
     /// `Assets/`, and the `README.md` users see in Finder. Resolves
@@ -483,10 +501,13 @@ import AppKit
 /// and any file-level sync (e.g. iCloud Drive) that snapshots only
 /// `workspace.sqlite` will see a stale view of the data. Belt-and-braces
 /// fix for a known gotcha; safe to leave on permanently.
-private nonisolated(unsafe) var shutdownObserverInstalled = false
+private let shutdownObserverInstalled = Atomic<Bool>(false)
 private func installShutdownCheckpoint(writer: any DatabaseWriter, url: URL) {
-    guard !shutdownObserverInstalled else { return }
-    shutdownObserverInstalled = true
+    // Compare-and-exchange so concurrent boot paths (GUI + CLI) can't
+    // both register termination observers.
+    guard shutdownObserverInstalled.compareExchange(
+        expected: false, desired: true, ordering: .acquiringAndReleasing
+    ).exchanged else { return }
 
     let checkpoint: @Sendable () -> Void = {
         do {

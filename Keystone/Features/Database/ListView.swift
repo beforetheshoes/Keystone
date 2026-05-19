@@ -11,39 +11,66 @@ struct ListView: View {
     var onOpen: (RecordRow) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                let buckets = groups.isEmpty
-                    ? [RecordGroup(label: "", key: "", rows: records)]
-                    : groups
-                ForEach(Array(buckets.enumerated()), id: \.offset) { _, bucket in
-                    if !bucket.label.isEmpty {
-                        GroupSectionHeader(label: bucket.label, count: bucket.rows.count)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 14)
-                            .padding(.bottom, 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(KstColor.paper0)
-                    }
-                    ForEach(bucket.rows) { r in
-                        ListRow(properties: properties, record: r) { onOpen(r) }
-                            .overlay(alignment: .bottom) {
-                                Rectangle().fill(KstColor.paper3).frame(height: 0.5)
-                            }
-                    }
+        // Native SwiftUI `List` rather than a `LazyVStack` so we get
+        // the WWDC25 list updates (up to 16× faster updates, 6× faster
+        // initial load for large macOS lists — see "What's new in
+        // SwiftUI", WWDC25 #256). Default list chrome is hidden so the
+        // visual matches the prior VStack-based design: plain style,
+        // no separators, no padding around rows, our own thin paper3
+        // hairline drawn at row bottom.
+        let buckets = groups.isEmpty
+            ? [RecordGroup(label: "", key: "", rows: records)]
+            : groups
+        List {
+            // Identify buckets by stable `key` (raw property value),
+            // not array position — see GalleryView for rationale.
+            ForEach(buckets, id: \.key) { bucket in
+                if !bucket.label.isEmpty {
+                    GroupSectionHeader(label: bucket.label, count: bucket.rows.count)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 14)
+                        .padding(.bottom, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(KstColor.paper0)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(KstColor.paper0)
+                }
+                ForEach(bucket.rows) { r in
+                    ListRow(properties: properties, record: r) { onOpen(r) }
+                        .equatable()
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(KstColor.paper3).frame(height: 0.5)
+                        }
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(KstColor.paper0)
                 }
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .background(KstColor.paper0)
     }
 }
 
-private struct ListRow: View {
+private struct ListRow: View, Equatable {
     var properties: [PropertyRow]
     var record: RecordRow
     var onTap: () -> Void
 
     @State private var hovering = false
+
+    /// Skip body re-evaluation when neither the row's own data nor its
+    /// columns changed. With `.equatable()` at the call site,
+    /// editing one record in the parent state no longer cascades into
+    /// every sibling row's body (WWDC25 "@Observable per-row" lesson).
+    /// `onTap` is intentionally not part of equality — it's reborn on
+    /// every parent body invocation but its identity is irrelevant
+    /// to what we render.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.record == rhs.record && lhs.properties == rhs.properties
+    }
 
     var body: some View {
         Button(action: onTap) {

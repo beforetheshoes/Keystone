@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import Synchronization
 import Dependencies
 @preconcurrency import SQLiteData
 
@@ -779,16 +780,24 @@ enum KeystoneCLI {
     /// network callbacks need the main thread's run loop to spin —
     /// so we keep CFRunLoop running until the Task completes and
     /// then stop it. CLI commands are short-lived, single-flight.
+    ///
+    /// `Mutex<T?>` is `Sendable` by declaration, so the result slot is
+    /// compiler-verified safe to share between the Task body and the
+    /// post-`CFRunLoopRun()` read. The runloop reference is never
+    /// captured — the Task fetches the main runloop with
+    /// `CFRunLoopGetMain()` (documented to return the same handle from
+    /// any thread) and calls the thread-safe `CFRunLoopStop`. CLI
+    /// commands always run on `main`, so `CFRunLoopGetCurrent()` and
+    /// `CFRunLoopGetMain()` are the same runloop.
     private static func runAsyncBlocking<T: Sendable>(_ body: @Sendable @escaping () async -> T) -> T {
-        nonisolated(unsafe) var result: T? = nil
-        nonisolated(unsafe) let runLoop = CFRunLoopGetCurrent()
+        let result = Mutex<T?>(nil)
         Task { @Sendable in
             let value = await body()
-            result = value
-            CFRunLoopStop(runLoop)
+            result.withLock { $0 = value }
+            CFRunLoopStop(CFRunLoopGetMain())
         }
         CFRunLoopRun()
-        return result!
+        return result.withLock { $0! }
     }
 
     private static func runSQL(args: [String]) throws {

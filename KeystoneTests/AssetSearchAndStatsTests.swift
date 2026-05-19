@@ -197,7 +197,7 @@ final class AssetSearchAndStatsTests: XCTestCase {
     func testSearchEmptyQueryReturnsNothing() throws {
         try withDB {
             @Dependency(\.defaultDatabase) var database
-            try database.write { db in
+            try database.write { db -> Void in
                 try insertAsset(db, filename: "anything.pdf", mime: "application/pdf", ext: "pdf", size: 1)
             }
             try database.read { db in

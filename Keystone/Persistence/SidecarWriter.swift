@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import OSLog
+import Synchronization
 
 private let sidecarLog = Logger(subsystem: "Keystone", category: "Sidecar")
 
@@ -36,20 +37,20 @@ enum SidecarWriter {
     /// record's processing (outside the suppression scope), so the
     /// final sidecar still reflects the imported state.
     ///
-    /// Marked `nonisolated(unsafe)` because GRDB serializes writes on
-    /// a single dispatch queue per writer, so the flag is only
-    /// touched from one thread at a time during the database.write
-    /// closure that holds it.
-    nonisolated(unsafe) private static var _suppressed: Bool = false
-    static var suppressed: Bool { _suppressed }
+    /// `Atomic<Bool>` is `Sendable` by declaration and gives us
+    /// compiler-verified concurrent access. GRDB serializes writes per
+    /// writer, so contention is zero in practice — but the atomic also
+    /// keeps reads from other threads (e.g. the CLI's import path
+    /// running outside a `database.write` block) honest.
+    private static let _suppressed = Atomic<Bool>(false)
+    static var suppressed: Bool { _suppressed.load(ordering: .acquiring) }
 
     /// Run `body` with sidecar regenerates suppressed. Restores the
     /// previous suppression state on exit so nested suppressors
     /// behave correctly even if we don't expect them in practice.
     static func suppress<T>(_ body: () throws -> T) rethrows -> T {
-        let prior = _suppressed
-        _suppressed = true
-        defer { _suppressed = prior }
+        let prior = _suppressed.exchange(true, ordering: .acquiringAndReleasing)
+        defer { _suppressed.store(prior, ordering: .releasing) }
         return try body()
     }
 

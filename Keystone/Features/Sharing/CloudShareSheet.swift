@@ -52,6 +52,12 @@ private struct MacCloudShareSheet: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
+        // `NSSharingService` needs the host view to be in a window
+        // before it can present. The view isn't attached during
+        // makeNSView; defer to the next runloop iteration via
+        // `DispatchQueue.main.async` for runloop-precise timing. A
+        // `Task { @MainActor in }` may run within the current frame
+        // and miss the window attachment.
         DispatchQueue.main.async {
             context.coordinator.presentSharingService(from: view)
         }

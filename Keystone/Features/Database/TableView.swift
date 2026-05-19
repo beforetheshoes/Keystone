@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 struct TableView: View {
     var db: DBRow
@@ -137,35 +138,53 @@ struct TableView: View {
                 // `.onTapGesture`, the inner cell's gesture takes
                 // precedence inside its bounds and the row's gesture
                 // handles everything else.
+                //
+                // `LazyVStack` instead of `VStack` so off-screen rows
+                // don't materialize their cell editors (TableSelectCell,
+                // TableMultiSelectCell, TableEditablePopoverField, …).
+                // Each row carries ~M cells × N popovers + hover state;
+                // for a table with thousands of records this is the
+                // single largest source of scroll lag. As of iOS/macOS
+                // 26 lazy stacks inside nested ScrollViews delay
+                // loading until rows are about to appear (WWDC25
+                // "What's new in SwiftUI"). Fixed row height (rowH=34)
+                // means the lazy stack can size offscreen rows without
+                // measuring them.
                 let buckets: [RecordGroup] = groups.isEmpty
                     ? [RecordGroup(label: "", key: "", rows: sortedRecords)]
                     : groups
-                ForEach(Array(buckets.enumerated()), id: \.offset) { _, bucket in
-                    if !bucket.label.isEmpty {
-                        GroupSectionHeader(label: bucket.label, count: bucket.rows.count)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 12)
-                            .padding(.bottom, 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(KstColor.paper0)
-                    }
-                    ForEach(bucket.rows) { r in
-                        TableRowView(
-                            record: r,
-                            properties: properties,
-                            rowHeight: rowH,
-                            cellValue: { cellValue(for: $0, in: r) },
-                            cellWidth: { width(for: $0) },
-                            onOpen: { onOpen(r) },
-                            onOpenRelation: onOpenRelation,
-                            onUpdateValue: onUpdateValue.map { handler in
-                                { key, value in handler(r.id, key, value) }
-                            },
-                            onAddPropertyOption: onAddPropertyOption,
-                            onRemovePropertyOption: onRemovePropertyOption
-                        )
-                        .overlay(alignment: .bottom) {
-                            Rectangle().fill(KstColor.paper3).frame(height: 0.5)
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                    // Identify buckets by stable `key` (raw property
+                    // value), not array position — otherwise a record
+                    // moving between groups invalidates every section.
+                    ForEach(buckets, id: \.key) { bucket in
+                        if !bucket.label.isEmpty {
+                            GroupSectionHeader(label: bucket.label, count: bucket.rows.count)
+                                .padding(.horizontal, 16)
+                                .padding(.top, 12)
+                                .padding(.bottom, 4)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(KstColor.paper0)
+                        }
+                        ForEach(bucket.rows) { r in
+                            TableRowView(
+                                record: r,
+                                properties: properties,
+                                rowHeight: rowH,
+                                cellValue: { cellValue(for: $0, in: r) },
+                                cellWidth: { width(for: $0) },
+                                onOpen: { onOpen(r) },
+                                onOpenRelation: onOpenRelation,
+                                onUpdateValue: onUpdateValue.map { handler in
+                                    { key, value in handler(r.id, key, value) }
+                                },
+                                onAddPropertyOption: onAddPropertyOption,
+                                onRemovePropertyOption: onRemovePropertyOption
+                            )
+                            .equatable()
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(KstColor.paper3).frame(height: 0.5)
+                            }
                         }
                     }
                 }
@@ -193,7 +212,16 @@ struct TableView: View {
 /// One row in the database table. Owns its own hover state and routes
 /// taps directly via `.onTapGesture` to dodge the
 /// nested-Button-in-ScrollView gesture-resolution bug on iOS.
-private struct TableRowView: View {
+///
+/// Equatable on the *data* inputs only (record, properties, rowHeight).
+/// Closures and callback shapes are intentionally excluded — those are
+/// recreated on every parent body invocation but their identity is
+/// irrelevant to what we render. With `.equatable()` applied at the
+/// call site, SwiftUI skips body when none of those data inputs
+/// changed — so editing one record's value in the parent doesn't
+/// re-evaluate every sibling row's body (the WWDC25 "@Observable
+/// per-row" lesson, applied at the SwiftUI struct level).
+private struct TableRowView: View, Equatable {
     let record: RecordRow
     let properties: [PropertyRow]
     let rowHeight: CGFloat
@@ -207,6 +235,12 @@ private struct TableRowView: View {
 
     @State private var hovering = false
 
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.record == rhs.record
+        && lhs.properties == rhs.properties
+        && lhs.rowHeight == rhs.rowHeight
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             HStack { RecordAvatar(record: record, size: 18, radius: 5) }
@@ -216,6 +250,7 @@ private struct TableRowView: View {
                     prop: p,
                     value: cellValue(p),
                     width: cellWidth(p),
+                    rowHovering: hovering,
                     relationTargets: record.relationTargets[p.key],
                     onOpenRelation: onOpenRelation,
                     onUpdateValue: onUpdateValue,
@@ -236,6 +271,15 @@ private struct TableCell: View {
     var prop: PropertyRow
     var value: String
     var width: CGFloat
+    /// Row-level hover state, fed down from `TableRowView`. Drives the
+    /// chevron fade-in on select / multiSelect cells. Per-cell `@State`
+    /// here used to do the same thing, but in a `LazyVStack` with M
+    /// columns × N visible rows that's M extra `.onHover` listeners
+    /// per row — pure overhead, since the row already tracks hover for
+    /// its background tint. The relation cell still keeps cell-level
+    /// hover (in `RelationCellContent`) because its underline-on-hover
+    /// is *per-glyph*, not per-row.
+    var rowHovering: Bool
     /// Set when this cell is for a `.relation` property and the record
     /// has at least one outgoing link bound to that property. Lets the
     /// cell route taps to the linked record instead of the row's own.
@@ -254,8 +298,6 @@ private struct TableCell: View {
     /// record. Surfaces in the multiSelect cell's popover as a
     /// hover-revealed trash icon per option.
     var onRemovePropertyOption: ((_ propertyID: String, _ option: String) -> Void)? = nil
-
-    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -284,16 +326,11 @@ private struct TableCell: View {
             // Multi-target relations (rare in current schema) jump to
             // the first target; the rest appear in the comma-joined
             // display value.
-            Text(displayValue.isEmpty ? "—" : displayValue)
-                .font(.kstText(size: 13))
-                .foregroundStyle(displayValue.isEmpty ? KstColor.ink3 : KstColor.ink0)
-                .underline(hovering, color: KstColor.ink2)
-                .multilineTextAlignment(TableView.swiftUITextAlignment(prop.resolvedAlignment))
-                .contentShape(Rectangle())
-                .onHover { hovering = $0 }
-                .onTapGesture {
-                    onOpenRelation(first.databaseID, first.recordID)
-                }
+            RelationCellContent(
+                display: displayValue,
+                alignment: prop.resolvedAlignment,
+                onTap: { onOpenRelation(first.databaseID, first.recordID) }
+            )
         } else if prop.type == .select, let onUpdate = onUpdateValue {
             // Inline-editable select tailored for table density:
             // - filled value: small cerulean badge (matches the
@@ -301,7 +338,9 @@ private struct TableCell: View {
             // - empty value: subtle "—" with no pill chrome
             // - hover: chevron fades in as a hint that the cell is
             //   editable, no chevron when idle so the column stays
-            //   quiet for a long list of rows
+            //   quiet for a long list of rows. Tied to the row's
+            //   hover state — hovering anywhere on the row shows the
+            //   chevron for every editable cell.
             //
             // We render the cell even when `config.options` is empty
             // — the "Add new…" affordance lets the user seed the
@@ -309,13 +348,12 @@ private struct TableCell: View {
             TableSelectCell(
                 value: value,
                 options: prop.config.options ?? [],
-                hovering: hovering,
+                hovering: rowHovering,
                 onPick: { onUpdate(prop.key, $0) },
                 onAddOption: onAddPropertyOption.map { handler in
                     { newOption in handler(prop.id, newOption) }
                 }
             )
-            .onHover { hovering = $0 }
         } else if prop.type == .multiSelect, let onUpdate = onUpdateValue {
             // Inline-editable multiSelect: chip strip for current
             // values plus a popover with checkboxes + a "New tag…"
@@ -324,7 +362,7 @@ private struct TableCell: View {
             TableMultiSelectCell(
                 value: value,
                 options: prop.config.options ?? [],
-                hovering: hovering,
+                hovering: rowHovering,
                 onUpdate: { onUpdate(prop.key, $0) },
                 onAddOption: onAddPropertyOption.map { handler in
                     { newOption in handler(prop.id, newOption) }
@@ -333,7 +371,6 @@ private struct TableCell: View {
                     { dead in handler(prop.id, dead) }
                 }
             )
-            .onHover { hovering = $0 }
         } else if prop.type == .select && !value.isEmpty && value != "—" {
             // Fallback: read-only select (e.g. a kind-scoped view with
             // no options config) renders the capsule unchanged.
@@ -484,24 +521,55 @@ private struct TableCell: View {
     }
 
     /// Cached per-currency-code formatter. Reusing an instance is much
-    /// cheaper than constructing one for every cell.
+    /// cheaper than constructing one for every cell. The cache lives
+    /// behind an `OSAllocatedUnfairLock` so the compiler can verify
+    /// `Sendable` safety regardless of isolation — view bodies run on
+    /// MainActor, but the cache is now callable from any isolation
+    /// (the off-MainActor derivation pipeline benefits from this).
     private static func currencyFormatter(code: String) -> NumberFormatter {
-        if let cached = formatterCache[code] { return cached }
-        let f = NumberFormatter()
-        f.numberStyle = .currency
-        f.currencyCode = code
-        f.maximumFractionDigits = 2
-        f.minimumFractionDigits = 2
-        formatterCache[code] = f
-        return f
+        formatterCache.withLock { cache in
+            if let cached = cache[code] { return cached }
+            let f = NumberFormatter()
+            f.numberStyle = .currency
+            f.currencyCode = code
+            f.maximumFractionDigits = 2
+            f.minimumFractionDigits = 2
+            cache[code] = f
+            return f
+        }
     }
 
-    nonisolated(unsafe) private static var formatterCache: [String: NumberFormatter] = [:]
+    private static let formatterCache = OSAllocatedUnfairLock<[String: NumberFormatter]>(initialState: [:])
 }
 
 // `RowHoverButtonStyle` was removed when row taps were switched from
 // `Button` to `.onTapGesture` to fix a nested-Button gesture-routing
 // bug on iOS — hover state lives on `TableRowView` directly now.
+
+/// Relation-cell text + tap target. Splits out of `TableCell` so the
+/// `@State hovering` (used for the underline-on-hover affordance) is
+/// confined to relation cells only — every other cell type pulls its
+/// hover state from the parent row. Otherwise every cell in the row
+/// would carry its own `@State` listener for an effect only one cell
+/// type uses.
+private struct RelationCellContent: View {
+    let display: String
+    let alignment: PropertyAlignment
+    let onTap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Text(display.isEmpty ? "—" : display)
+            .font(.kstText(size: 13))
+            .foregroundStyle(display.isEmpty ? KstColor.ink3 : KstColor.ink0)
+            .underline(hovering, color: KstColor.ink2)
+            .multilineTextAlignment(TableView.swiftUITextAlignment(alignment))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .onTapGesture(perform: onTap)
+    }
+}
 
 struct PropTypeIcon: View {
     var type: PropertyType

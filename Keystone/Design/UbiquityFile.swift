@@ -20,9 +20,18 @@ import Foundation
 /// materialized" so the same code path works for every storage
 /// location choice.
 enum UbiquityFile {
-    /// True when the file is either non-ubiquitous (local) or fully
-    /// downloaded (`ubiquitousItemDownloadingStatus == .current`).
-    /// False for placeholders, in-progress downloads, and read errors.
+    /// True when the file has local bytes available — either it's not
+    /// in a ubiquity container at all, or its iCloud downloading status
+    /// is `.current` (local + up-to-date) or `.downloaded` (local but
+    /// may be older than server). Both are readable; only `.notDownloaded`
+    /// is a placeholder.
+    ///
+    /// The earlier version of this check accepted only `.current`,
+    /// which caused most covers to stay invisible: macOS often reports
+    /// `.downloaded` for files this device wrote during normal sync
+    /// settling, so the gallery would spin in `awaitMaterialization`
+    /// for 30 seconds and time out before reading bytes that were
+    /// always there on disk.
     static func isMaterialized(_ url: URL) -> Bool {
         guard let vals = try? url.resourceValues(forKeys: [
             .isUbiquitousItemKey,
@@ -37,7 +46,17 @@ enum UbiquityFile {
         guard vals.isUbiquitousItem == true else {
             return FileManager.default.fileExists(atPath: url.path)
         }
-        return vals.ubiquitousItemDownloadingStatus == .current
+        switch vals.ubiquitousItemDownloadingStatus {
+        case .current, .downloaded:
+            return true
+        default:
+            // `.notDownloaded` is a placeholder we need to materialize;
+            // `nil` shouldn't happen for ubiquitous items but is
+            // treated conservatively. Fall back to fileExists — if
+            // the bytes are actually there on disk, we can read them
+            // regardless of what the status says.
+            return FileManager.default.fileExists(atPath: url.path)
+        }
     }
 
     /// Kick off an iCloud download for a placeholder. Fire-and-forget;
