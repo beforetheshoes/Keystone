@@ -88,6 +88,13 @@ AuthKey_*.p8
 .traces/
 Launch_*.trace/
 
+# Stray reference material that's wandered into the working tree.
+# These were tracked at one point and then removed from history;
+# keep them out of any future commit even if a local copy is present
+# on disk.
+/Honda Maintenance Schedule.pdf
+/Using Claude Code The Unreasonable Effectiveness of HTML.md
+
 # Claude scratch (in case anything ever lands inside the repo)
 .claude/
 CLAUDE.local.md
